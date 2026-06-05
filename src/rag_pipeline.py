@@ -61,8 +61,9 @@ JURISDICTION_MAP: dict[str, list[str]] = {
 # Logging — suppress noisy HuggingFace HTTP logs
 # ---------------------------------------------------------------------------
 
-# Use cached model weights; skip HF Hub network checks on startup
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
+# HF_HUB_OFFLINE=1 is set by run.bat / run.sh for local runs where the model
+# is already cached. On HuggingFace Spaces the var is absent so the model can
+# be downloaded on cold start — do NOT set a default here.
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s  %(message)s")
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
