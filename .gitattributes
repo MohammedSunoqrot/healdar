@@ -1,6 +1,5 @@
 # Default: normalize to LF in repo, check out as-is on Windows
 * text=auto
-
 # Shell scripts must always be LF (they run on Linux/HuggingFace)
 *.sh text eol=lf
 # Windows batch files stay CRLF
