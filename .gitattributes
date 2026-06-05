@@ -1,0 +1,16 @@
+# Default: normalize to LF in repo, check out as-is on Windows
+* text=auto
+
+# Shell scripts must always be LF (they run on Linux/HuggingFace)
+*.sh text eol=lf
+# Windows batch files stay CRLF
+*.bat text eol=crlf
+# Binary files — never touch line endings
+*.bin binary
+*.db  binary
+*.pdf binary
+*.pickle binary
+*.pyc binary
+*.sqlite3 filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.pickle filter=lfs diff=lfs merge=lfs -text

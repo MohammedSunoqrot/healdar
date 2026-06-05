@@ -1,0 +1,38 @@
+# ── Secrets — never commit ────────────────────────────────────────────
+.env
+.streamlit/secrets.toml
+
+# ── Claude Code local settings ────────────────────────────────────────
+.claude/
+
+# ── Python environment ────────────────────────────────────────────────
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Test / coverage artefacts ─────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ── OS / editor artefacts ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log
+.idea/
+.vscode/
+*.swp
+
+# ── Runtime data files (contain user queries — do not commit)
+data/runtime/last_session.json
+data/runtime/analytics.db
+
+# ── Raw source PDFs (large; vectorstore is the built artefact) ────────
+data/raw_docs/

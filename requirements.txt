@@ -1,0 +1,21 @@
+# Healdar — production dependencies
+# Generated from Python 3.13 environment
+# For CPU-only Docker deployments, torch is pulled from the PyTorch index (see Dockerfile)
+
+streamlit==1.58.0
+groq==1.4.0
+chromadb==1.5.9
+sentence-transformers==5.5.1
+python-dotenv==1.2.2
+PyMuPDF==1.27.2.3
+pypdf==6.12.2
+langchain-text-splitters==1.1.2
+tiktoken==0.13.0
+reportlab==4.5.1
+python-docx==1.2.0
+
+# sentence-transformers pulls torch — pin CPU build to keep image lean
+# (torch with CUDA is ~2 GB; CPU build is ~250 MB)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.7.0+cpu
+torchvision==0.22.0+cpu

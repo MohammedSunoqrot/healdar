@@ -1,0 +1,26 @@
+# Development / local environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+tests/
+
+# Secrets — never copy into the image
+code/.env
+.env
+
+# Local OS / editor artefacts
+.DS_Store
+Thumbs.db
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Windows launch script (not needed in container)
+run.bat
+
+# Source PDFs (vectorstore is already pre-built and copied separately)
+data/raw_docs/
