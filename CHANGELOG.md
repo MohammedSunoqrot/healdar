@@ -119,6 +119,13 @@ regulators.**
   not find the Arabic UAE PDPL from English questions at all. `multilingual-e5-small`
   was rejected: its on- and off-topic distances overlap (gap −0.011), so no threshold
   could refuse off-topic questions reliably.
+- **Acronym-aware keyword search.** "AI-based" shared no keyword with guidance that
+  writes "AI", so the starter question *"How does SFDA regulate AI-based Software as a
+  Medical Device?"* never retrieved SFDA's AI/ML guidance (MDS-G010) — and the answer
+  claimed SFDA had no AI-specific guidance. The keyword query now splits hyphenated
+  words and spells out common acronyms (AI, SaMD, PCCP, PDPL, …); MDS-G010 is now the
+  top Saudi result. The embedding query is untouched, so the relevance gate's
+  calibration is unchanged (`HEALDAR_QUERY_EXPANSION=0` turns it off).
 - **Jurisdiction balancing** with a soft cap per jurisdiction.
 - **Coverage signalling**: a self-assessed `full`/`partial` marker drives a caution
   banner, and each citation shows how well it matched.
@@ -130,7 +137,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 215.
+- Tests: 48 → 222.
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

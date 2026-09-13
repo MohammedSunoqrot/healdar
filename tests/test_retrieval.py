@@ -70,6 +70,40 @@ class TestTokenize(unittest.TestCase):
         self.assertEqual(retrieval.tokenize(""), [])
 
 
+class TestQueryExpansion(unittest.TestCase):
+    """Acronyms in a question must reach documents that spell them out."""
+
+    def test_query_compounds_kept_and_split(self):
+        toks = retrieval.tokenize("AI-based MDS-G010", split_compounds=True)
+        for t in ("ai-based", "ai", "based", "mds-g010"):
+            self.assertIn(t, toks)
+
+    def test_corpus_compounds_kept_whole(self):
+        self.assertEqual(retrieval.tokenize("MDS-G010 AI-based"), ["mds-g010", "ai-based"])
+
+    def test_acronyms_expanded(self):
+        q = "How does SFDA regulate AI-based SaMD?"
+        out = retrieval.expand_query(q)
+        self.assertTrue(out.startswith(q))
+        self.assertIn("artificial intelligence", out)
+        self.assertIn("software as a medical device", out)
+
+    def test_no_duplicate_when_already_spelled_out(self):
+        q = "AI (artificial intelligence) in devices"
+        self.assertEqual(retrieval.expand_query(q), q)
+
+    def test_each_expansion_once(self):
+        out = retrieval.expand_query("AI and more AI")
+        self.assertEqual(out.count("artificial intelligence"), 1)
+
+    def test_lowercase_words_untouched(self):
+        q = "the said email is mild"
+        self.assertEqual(retrieval.expand_query(q), q)
+
+    def test_no_acronyms_unchanged(self):
+        self.assertEqual(retrieval.expand_query("What is Annex VIII?"), "What is Annex VIII?")
+
+
 class TestRelevanceGate(unittest.TestCase):
     """Off-topic questions must return nothing, not five weak passages."""
 

@@ -116,7 +116,7 @@ Healdar/
 │   ├── raw_docs/               # source PDFs, one folder per regulator — NOT committed
 │   └── runtime/                # local runtime data — NOT committed
 │
-├── tests/                  # 215 tests
+├── tests/                  # 222 tests
 └── .github/workflows/ci.yml
 ```
 
@@ -171,7 +171,7 @@ Decree-Law 45/2021, whose official text is Arabic only.
 ### Running the checks
 
 ```bash
-pytest tests -q                       # 215 tests
+pytest tests -q                       # 222 tests
 python eval/run_eval.py               # retrieval metrics (no API key needed)
 python eval/run_eval.py --full        # also generates answers (uses Groq)
 ruff check src tests eval scripts

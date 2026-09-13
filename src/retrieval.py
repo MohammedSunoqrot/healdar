@@ -34,9 +34,70 @@ logger = logging.getLogger(__name__)
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:[-/.][a-z0-9]+)*")
 
 
-def tokenize(text: str) -> list[str]:
-    """Lowercase tokenizer that preserves regulatory identifiers."""
-    return _TOKEN_RE.findall(text.lower())
+def tokenize(text: str, *, split_compounds: bool = False) -> list[str]:
+    """
+    Lowercase tokenizer that preserves regulatory identifiers.
+
+    split_compounds (queries only) also emits the parts of hyphenated
+    compounds, so a question about "AI-based software" shares the token "ai"
+    with guidance that writes "AI". The corpus keeps compounds whole, so exact
+    identifiers such as "mds-g010" stay distinctive.
+    """
+    out: list[str] = []
+    for tok in _TOKEN_RE.findall(text.lower()):
+        out.append(tok)
+        if split_compounds and "-" in tok:
+            out.extend(part for part in tok.split("-") if part)
+    return out
+
+
+# Acronyms users type that the source documents often spell out. Without this
+# (and query-side compound splitting), "How does SFDA regulate AI-based
+# Software as a Medical Device?" never reached SFDA's AI/ML guidance
+# (MDS-G010), even filtered to Saudi Arabia -- and the answer went on to claim
+# SFDA had no AI-specific guidance at all. With both, MDS-G010 is the top Saudi
+# hit. Expanding the dense query as well cost two evaluation cases, so only
+# BM25 sees the expansion.
+_GLOSSARY: dict[str, str] = {
+    "AI":    "artificial intelligence",
+    "ML":    "machine learning",
+    "SaMD":  "software as a medical device",
+    "SAMD":  "software as a medical device",
+    "SiMD":  "software in a medical device",
+    "PCCP":  "predetermined change control plan",
+    "GMLP":  "good machine learning practice",
+    "PDPL":  "personal data protection law",
+    "QMS":   "quality management system",
+    "PMS":   "post-market surveillance",
+    "CDS":   "clinical decision support",
+    "LLM":   "large language model",
+    "LLMs":  "large language models",
+    "GenAI": "generative artificial intelligence",
+    "GPAI":  "general-purpose artificial intelligence",
+    "IVD":   "in vitro diagnostic",
+    "IVDR":  "in vitro diagnostic regulation",
+    "MDR":   "medical devices regulation",
+    "UDI":   "unique device identification",
+    "RWE":   "real-world evidence",
+    "RWD":   "real-world data",
+    "EHR":   "electronic health record",
+    "HIE":   "health information exchange",
+    "DPIA":  "data protection impact assessment",
+}
+_ACRONYM_RE = re.compile(
+    r"\b(" + "|".join(sorted(map(re.escape, _GLOSSARY), key=len, reverse=True)) + r")\b"
+)
+
+
+def expand_query(query: str) -> str:
+    """Append the spelled-out form of each known acronym the query leaves out."""
+    lower = query.lower()
+    extra: list[str] = []
+    for acronym in dict.fromkeys(_ACRONYM_RE.findall(query)):
+        full = _GLOSSARY[acronym]
+        if full not in lower and full not in extra:
+            extra.append(full)
+    return f"{query} ({'; '.join(extra)})" if extra else query
 
 
 @dataclass
@@ -192,7 +253,7 @@ class Retriever:
         self._ensure_bm25()
         if self._bm25 is None:
             return []
-        tokens = tokenize(query)
+        tokens = tokenize(query, split_compounds=True)
         if not tokens:
             return []
         scores = self._bm25.get_scores(tokens)
@@ -279,12 +340,15 @@ class Retriever:
         top_k = top_k or config.TOP_K
         if balance is None:
             balance = len(jurisdictions) != 1
+        # Expansion feeds BM25 only. Appending words to the dense query moves
+        # its embedding, and with it every distance the relevance gate is tuned on.
+        lex_query = expand_query(query) if config.QUERY_EXPANSION else query
 
         dense = self._dense(query, jurisdictions, config.CANDIDATE_K)
         by_id: dict[str, Passage] = {p.chunk_id: p for p in dense}
 
         if self._hybrid:
-            lex_ids = self._lexical_ids(query, jurisdictions, config.CANDIDATE_K)
+            lex_ids = self._lexical_ids(lex_query, jurisdictions, config.CANDIDATE_K)
             missing = [cid for cid in lex_ids if cid not in by_id]
             for p in self._hydrate(missing, query):
                 by_id[p.chunk_id] = p

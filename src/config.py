@@ -116,6 +116,9 @@ WEAK_DISTANCE = _env_float("HEALDAR_WEAK_DISTANCE", 0.45)
 # exact tokens ("Article 120", "MDS-G010", "Annex VIII") that embeddings blur.
 HYBRID_SEARCH  = _env_bool("HEALDAR_HYBRID", True)
 RRF_K          = _env_int("HEALDAR_RRF_K", 60)   # reciprocal-rank-fusion constant
+# Append spelled-out forms of acronyms (AI, SaMD, PDPL, ...) to the query; see
+# retrieval.expand_query for the measurement behind it.
+QUERY_EXPANSION = _env_bool("HEALDAR_QUERY_EXPANSION", True)
 
 # In "all jurisdictions" mode, cap how many passages one jurisdiction may take.
 # EU is ~47% of the corpus, so an unbalanced top-5 is usually 4x EU.
