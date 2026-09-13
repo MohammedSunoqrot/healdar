@@ -44,6 +44,12 @@ and a third would have produced wrong answers rather than no answers.
 
 ### Interface
 
+- **Answers apply the rules to your case.** Asked to classify a described product,
+  the old prompt ("answer using ONLY the context") produced "the context does not
+  contain the classification rules". Healdar now walks through the deciding rule, shows
+  how the facts meet its conditions, reaches a conclusion ("most likely Class IIb") with
+  its assumptions and what would change it, and cites each rule it relies on. Anything
+  taken from general knowledge rather than the documents is marked as such.
 - **Light mode rebuilt properly.** The old app forced Streamlit's dark theme and
   repainted a "light mode" with CSS overrides that Streamlit's own widgets never
   received — hence black buttons, a black header bar, an unreadable comparison toggle and
@@ -126,6 +132,14 @@ regulators.**
   words and spells out common acronyms (AI, SaMD, PCCP, PDPL, …); MDS-G010 is now the
   top Saudi result. The embedding query is untouched, so the relevance gate's
   calibration is unchanged (`HEALDAR_QUERY_EXPANSION=0` turns it off).
+- **Case questions reach the rule that decides them.** "Suggest the class of this
+  retinal-screening software" is worded nothing like MDR Annex VIII Rule 11, so it
+  retrieved FAQ pages. A planning step now asks the model which provisions the question
+  depends on, in the regulation's own wording, and searches each alongside the question.
+  Results are merged round-robin, so every planned search keeps its best page (merging by
+  summed rank let half-matches push out the Rule 11 page); MDCG 2019-11's Rule 11 pages
+  now reach both classification test questions. The user's own question still alone
+  decides whether anything relevant exists, so off-topic questions are refused as before.
 - **Jurisdiction balancing** with a soft cap per jurisdiction.
 - **Coverage signalling**: a self-assessed `full`/`partial` marker drives a caution
   banner, and each citation shows how well it matched.
@@ -137,7 +151,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 222.
+- Tests: 48 → 236.
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

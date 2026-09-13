@@ -19,7 +19,7 @@ from rag_pipeline import (
     RateLimitError,
     ServiceUnavailableError,
 )
-from retrieval import Passage
+from retrieval import Passage, RetrievalResult
 
 
 def _bare_rag() -> HealdarRAG:
@@ -355,6 +355,94 @@ class TestAskValidation(unittest.TestCase):
     def test_unknown_jurisdiction_raises_value_error(self):
         with self.assertRaises(ValueError):
             _bare_rag().ask("q", jurisdiction="atlantis")
+
+
+class TestQueryPlanning(unittest.TestCase):
+    """Case-style questions get searches that name the rule deciding them."""
+
+    def test_parse_strips_numbering_and_bullets(self):
+        raw = "1. MDR Annex VIII Rule 11\n- MDCG 2019-11 software classification\n* Rule 11 examples"
+        self.assertEqual(
+            HealdarRAG._parse_planned(raw, "q"),
+            ["MDR Annex VIII Rule 11", "MDCG 2019-11 software classification", "Rule 11 examples"],
+        )
+
+    def test_parse_drops_duplicates_blanks_and_the_question(self):
+        raw = "Which class?\n\nRule 11\nRule 11\n"
+        self.assertEqual(HealdarRAG._parse_planned(raw, "Which class?"), ["Rule 11"])
+
+    def test_parse_caps_the_number_of_queries(self):
+        raw = "\n".join(f"query number {i}" for i in range(10))
+        self.assertEqual(len(HealdarRAG._parse_planned(raw, "q")), config.PLANNED_QUERIES)
+
+    def test_planner_failure_falls_back_to_the_question_alone(self):
+        from unittest import mock
+        rag = _bare_rag()
+        rag._chat = mock.MagicMock(side_effect=RuntimeError("groq down"))
+        self.assertEqual(rag._plan_queries("q"), [])
+
+    def test_planning_can_be_disabled(self):
+        from unittest import mock
+        rag = _bare_rag()
+        rag._chat = mock.MagicMock(return_value="Rule 11")
+        with mock.patch.object(config, "QUERY_PLANNING", False):
+            self.assertEqual(rag._plan_queries("q"), [])
+        rag._chat.assert_not_called()
+
+    def test_planner_is_told_the_jurisdiction(self):
+        from unittest import mock
+        rag = _bare_rag()
+        rag._chat = mock.MagicMock(return_value="Rule 11 software classification")
+        self.assertEqual(rag._plan_queries("Which class?", "eu"),
+                         ["Rule 11 software classification"])
+        kwargs = rag._chat.call_args.kwargs
+        self.assertIn("(jurisdiction: EU)", kwargs["content"])
+        self.assertEqual(kwargs["model"], config.GROQ_MODEL_PLANNER)
+
+
+class TestAskWithPlanning(unittest.TestCase):
+    """End to end through ask(), with retrieval and Groq mocked."""
+
+    def _rag(self, first, chat_replies):
+        from unittest import mock
+        rag = _bare_rag()
+        rag.answer_model = "answer-model"
+        rag._retriever = mock.MagicMock()
+        rag._retriever.search.return_value = first
+        rag._retriever.search_many.return_value = RetrievalResult(
+            [_passage(text="Rule 11 text", fname="MDCG_2019-11.pdf", jx="EU_MDCG")]
+        )
+        rag._chat = mock.MagicMock(side_effect=list(chat_replies))
+        return rag
+
+    def test_off_topic_question_refused_without_planning(self):
+        rag = self._rag(RetrievalResult([], quality="no_match", best_distance=0.8), [])
+        answer = rag.ask("How do I bake sourdough bread?", "eu")
+        self.assertTrue(answer.no_context)
+        rag._chat.assert_not_called()
+        rag._retriever.search_many.assert_not_called()
+
+    def test_planned_queries_join_the_search(self):
+        rag = self._rag(
+            RetrievalResult([_passage(text="FAQ text", jx="EU_MDCG")], quality="weak"),
+            ["MDR Annex VIII Rule 11 software", "Most likely Class IIa [Source 1].\nCOVERAGE: full"],
+        )
+        answer = rag.ask("Which class is my retinal screening software?", "eu")
+        queries = rag._retriever.search_many.call_args[0][0]
+        self.assertEqual(queries, ["Which class is my retinal screening software?",
+                                   "MDR Annex VIII Rule 11 software"])
+        self.assertEqual(answer.sources[0]["filename"], "MDCG_2019-11.pdf")
+        self.assertEqual(answer.coverage, "full")
+
+
+class TestPromptAllowsReasoning(unittest.TestCase):
+    """The model should apply the rules it is given, not refuse to conclude."""
+
+    def test_invites_applying_rules_to_a_case(self):
+        prompt = _bare_rag()._build_prompt("Which class?", TestBuildPrompt.PASSAGES)
+        self.assertIn("apply the rules in the passages", prompt)
+        self.assertIn("must come from them, with a citation", prompt)
+        self.assertNotIn("using ONLY the CONTEXT", prompt)
 
 
 class TestCanonicalCitations(unittest.TestCase):

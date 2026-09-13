@@ -380,6 +380,73 @@ class Retriever:
         quality = "weak" if best is not None and best > config.WEAK_DISTANCE else "ok"
         return RetrievalResult(selected, quality=quality, best_distance=best)
 
+    def search_many(
+        self,
+        queries: list[str],
+        jurisdictions: list[str] | None = None,
+        *,
+        top_k: int | None = None,
+        balance: bool | None = None,
+    ) -> RetrievalResult:
+        """
+        Search several phrasings of one question and fuse their rankings.
+
+        queries[0] must be the user's own question: it alone decides whether
+        anything relevant exists. The others come from a model and could make
+        an off-topic question look answerable, so they may add evidence but
+        never admit a question the relevance gate would have refused.
+        """
+        queries = [q for q in dict.fromkeys(q.strip() for q in queries if q) if q]
+        if not queries:
+            return RetrievalResult([], quality="no_match")
+        jurisdictions = list(jurisdictions or [])
+        # Planned evidence gets slots of its own on top of the question's
+        # reserved best matches, rather than competing with them.
+        top_k = top_k or (config.TOP_K + config.PLAN_KEEP_ORIGINAL)
+        if balance is None:
+            balance = len(jurisdictions) != 1
+
+        def ranked(q: str) -> RetrievalResult:
+            return self.search(q, jurisdictions, top_k=config.CANDIDATE_K, balance=False)
+
+        first = ranked(queries[0])
+        if not first:
+            return first
+
+        planned = [ranked(q) for q in queries[1:]]
+
+        pool: dict[str, Passage] = {}
+        for result in (first, *planned):
+            for p in result.passages:
+                kept = pool.get(p.chunk_id)
+                if kept is None or p.distance < kept.distance:
+                    pool[p.chunk_id] = p
+        bests = [r.best_distance for r in (first, *planned) if r.best_distance is not None]
+        best = min(bests) if bests else None
+
+        # The question's own best passages first, then round-robin: every
+        # planned query's top hit, then every one's second, and so on, with the
+        # rest of the question's own list last in each round. Fusing by summed
+        # rank (RRF) instead let pages that several queries half-matched push
+        # out the one page a query was aimed at -- for a classification
+        # question, the page holding the classification rule.
+        keep_n = config.PLAN_KEEP_ORIGINAL
+        order = [p.chunk_id for p in first.passages[:keep_n]]
+        seen = set(order)
+        streams = [r.passages for r in planned] + [first.passages[keep_n:]]
+        for i in range(max((len(s) for s in streams), default=0)):
+            for stream in streams:
+                if i < len(stream) and stream[i].chunk_id not in seen:
+                    seen.add(stream[i].chunk_id)
+                    order.append(stream[i].chunk_id)
+        ordered = [pool[cid] for cid in order]
+        for rank, p in enumerate(ordered):
+            p.fused_score = 1.0 / (rank + 1)
+
+        selected = self._balance(ordered, top_k) if balance else ordered[:top_k]
+        quality = "weak" if best is not None and best > config.WEAK_DISTANCE else "ok"
+        return RetrievalResult(selected, quality=quality, best_distance=best)
+
     def _balance(self, passages: list[Passage], top_k: int) -> list[Passage]:
         """
         Take the best passages while capping how many any one jurisdiction may

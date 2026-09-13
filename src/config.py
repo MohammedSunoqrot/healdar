@@ -119,6 +119,19 @@ RRF_K          = _env_int("HEALDAR_RRF_K", 60)   # reciprocal-rank-fusion consta
 # Append spelled-out forms of acronyms (AI, SaMD, PDPL, ...) to the query; see
 # retrieval.expand_query for the measurement behind it.
 QUERY_EXPANSION = _env_bool("HEALDAR_QUERY_EXPANSION", True)
+# Before searching, a small model names the provisions and guidance a question
+# depends on ("MDR Annex VIII Rule 11 software classification"), and each is
+# searched alongside the question itself. Case-style questions ("suggest the
+# class of this retinal-screening software") otherwise land on FAQ pages rather
+# than the rule that decides them. The user's own question still decides refusal.
+QUERY_PLANNING  = _env_bool("HEALDAR_QUERY_PLANNING", True)
+PLANNED_QUERIES = _env_int("HEALDAR_PLANNED_QUERIES", 3)
+# The 120b model, ~1 s on Groq: the 20b one guessed wrong provisions, looped,
+# or spent its whole budget reasoning and returned nothing.
+GROQ_MODEL_PLANNER = _env_str("GROQ_MODEL_PLANNER", GROQ_MODEL_LARGE)
+# How many of the question's own top passages always survive fusion. Planned
+# retrieval returns TOP_K + this many, so planned evidence gets its own slots.
+PLAN_KEEP_ORIGINAL = _env_int("HEALDAR_PLAN_KEEP_ORIGINAL", 2)
 
 # In "all jurisdictions" mode, cap how many passages one jurisdiction may take.
 # EU is ~47% of the corpus, so an unbalanced top-5 is usually 4x EU.

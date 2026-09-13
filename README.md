@@ -44,6 +44,7 @@ properties matter more than fluency here:
 | **Bilingual** | English and Arabic interface and answers, right-to-left where needed |
 | **Arabic sources** | The UAE PDPL is indexed in its official Arabic text and is found from English questions, via multilingual embeddings |
 | **7 jurisdiction views** | 🇸🇦 Saudi Arabia · 🇦🇪 UAE · 🇶🇦 Qatar · 🇪🇺 EU · 🇺🇸 US · 🌐 International (WHO, IMDRF) · 🌍 All |
+| **Reasons through your case** | Describe a product and ask how the rules apply — which class, which pathway. Healdar searches for the rules that decide it, applies them step by step, cites the page behind each step, and states its assumptions |
 | **Hybrid retrieval** | Dense embeddings **+** BM25, fused with Reciprocal Rank Fusion — so "Article 120" and "MDS-G010" are found by exact token, not just by meaning |
 | **Balanced "all" mode** | Passages are capped per jurisdiction, so the EU (44% of the corpus) cannot crowd out the Gulf regulators |
 | **Comparison mode** | Two jurisdictions side by side, queried in parallel |
@@ -64,6 +65,8 @@ User question (EN or AR)
         ├── Arabic? ──► translate to English            gpt-oss-20b
         │
         ├── follow-up? ──► rewrite as standalone        gpt-oss-20b
+        │
+        ├── plan: which rules decide this? ─► 3 searches gpt-oss-120b
         │
         ▼
 ┌────────────────────────────────────────────────┐
@@ -116,7 +119,7 @@ Healdar/
 │   ├── raw_docs/               # source PDFs, one folder per regulator — NOT committed
 │   └── runtime/                # local runtime data — NOT committed
 │
-├── tests/                  # 222 tests
+├── tests/                  # 236 tests
 └── .github/workflows/ci.yml
 ```
 
@@ -171,7 +174,7 @@ Decree-Law 45/2021, whose official text is Arabic only.
 ### Running the checks
 
 ```bash
-pytest tests -q                       # 222 tests
+pytest tests -q                       # 236 tests
 python eval/run_eval.py               # retrieval metrics (no API key needed)
 python eval/run_eval.py --full        # also generates answers (uses Groq)
 ruff check src tests eval scripts
@@ -193,6 +196,8 @@ Everything is environment-overridable — see `.env.example` for the full list.
 | `HEALDAR_EMBED_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | Embedding model — rebuild the index after changing |
 | `HEALDAR_TOP_K` | `5` | Passages given to the model |
 | `HEALDAR_HYBRID` | `1` | BM25 alongside dense search |
+| `HEALDAR_QUERY_PLANNING` | `1` | Search for the rules a question depends on, not just its wording |
+| `GROQ_MODEL_PLANNER` | `openai/gpt-oss-120b` | Plans those searches |
 | `HEALDAR_MAX_PER_JX` | `2` | Per-jurisdiction cap in "all" mode |
 | `HEALDAR_PERSIST_SESSION` | `0` | Chat history to disk — **leave off when shared** |
 | `HEALDAR_ANALYTICS_QUESTIONS` | `0` | Store raw question text in the operator log |

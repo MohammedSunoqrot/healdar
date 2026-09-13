@@ -170,7 +170,7 @@ ephemeral here too.
 | Every question answers "no relevant material found" | Vector store is pointer stubs or corrupt | `git lfs pull`, or `python src/embed.py --rebuild`. The app self-heals if `HEALDAR_AUTO_REBUILD=1` (the default). |
 | "The configured language model was rejected" | Groq retired the model | Set `GROQ_MODEL_ANSWER` to a current model from [the model list](https://console.groq.com/docs/models) |
 | "Healdar is temporarily unavailable" on load | Missing `GROQ_API_KEY`, or the index could not be opened or rebuilt | The card shows the underlying error; check the container logs |
-| Rate-limit warnings under load | Groq free-tier quota | Set `HEALDAR_RATE_LIMIT_QUERIES`, or upgrade the Groq plan |
+| Rate-limit warnings under load | Groq free-tier quota: 8,000 tokens a minute for `gpt-oss-120b`, and one question requests about 5,000 of them | Set `HEALDAR_RATE_LIMIT_QUERIES`, or upgrade the Groq plan. `HEALDAR_QUERY_PLANNING=0` saves ~650 tokens a question, at the cost of weaker answers to case questions |
 | Answers are hedged or refused too often | Relevance gate too tight for your corpus | Raise `HEALDAR_MAX_DISTANCE`, then re-run `python eval/run_eval.py` to confirm off-topic questions are still refused |
 
 ---

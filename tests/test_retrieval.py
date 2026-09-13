@@ -104,6 +104,73 @@ class TestQueryExpansion(unittest.TestCase):
         self.assertEqual(retrieval.expand_query("What is Annex VIII?"), "What is Annex VIII?")
 
 
+class TestSearchMany(unittest.TestCase):
+    """Planned queries add evidence; only the user's own question admits it."""
+
+    @staticmethod
+    def _p(cid, dist):
+        return retrieval.Passage(chunk_id=cid, text=cid, filename=f"{cid}.pdf",
+                                 jurisdiction="EU_MDCG", page_number=1, distance=dist)
+
+    @staticmethod
+    def _retriever(*results):
+        from unittest import mock
+        r = retrieval.Retriever(object(), hybrid=False)
+        r.search = mock.MagicMock(side_effect=list(results))
+        return r
+
+    def test_refusal_decided_by_the_first_query(self):
+        r = self._retriever(
+            retrieval.RetrievalResult([], quality="no_match", best_distance=0.7),
+            retrieval.RetrievalResult([self._p("rule11", 0.2)], best_distance=0.2),
+        )
+        out = r.search_many(["cooking recipes", "MDR Annex VIII Rule 11"])
+        self.assertFalse(out)
+        self.assertEqual(out.quality, "no_match")
+        self.assertEqual(r.search.call_count, 1)
+
+    def test_planned_evidence_is_fused_in(self):
+        r = self._retriever(
+            retrieval.RetrievalResult([self._p("faq", 0.45), self._p("rule11", 0.50)],
+                                      quality="weak", best_distance=0.45),
+            retrieval.RetrievalResult([self._p("rule11", 0.25), self._p("examples", 0.30)],
+                                      best_distance=0.25),
+        )
+        out = r.search_many(["case question", "MDR Annex VIII Rule 11"], ["EU_MDCG"], top_k=3)
+        ids = [p.chunk_id for p in out.passages]
+        self.assertEqual(ids, ["faq", "rule11", "examples"])
+        self.assertAlmostEqual(out.passages[1].distance, 0.25)   # best of both searches
+        self.assertEqual(out.quality, "ok")
+
+    def test_question_top_results_never_displaced(self):
+        r = self._retriever(
+            retrieval.RetrievalResult([self._p("a", 0.4), self._p("b", 0.4), self._p("c", 0.4)],
+                                      best_distance=0.4),
+            retrieval.RetrievalResult([self._p("x", 0.3), self._p("y", 0.3)], best_distance=0.3),
+            retrieval.RetrievalResult([self._p("x", 0.3), self._p("y", 0.3)], best_distance=0.3),
+        )
+        out = r.search_many(["q", "plan 1", "plan 2"], ["EU_MDCG"], top_k=3)
+        self.assertEqual([p.chunk_id for p in out.passages], ["a", "b", "x"])
+
+    def test_each_planned_query_keeps_its_top_hit(self):
+        # "common" is a half-match for two queries; "z1" is the one page the
+        # third query was aimed at. Summed-rank fusion would pick "common".
+        r = self._retriever(
+            retrieval.RetrievalResult([self._p("a", 0.4), self._p("b", 0.4)], best_distance=0.4),
+            retrieval.RetrievalResult([self._p("x1", 0.3), self._p("common", 0.3)], best_distance=0.3),
+            retrieval.RetrievalResult([self._p("y1", 0.3), self._p("common", 0.3)], best_distance=0.3),
+            retrieval.RetrievalResult([self._p("z1", 0.2)], best_distance=0.2),
+        )
+        out = r.search_many(["q", "p1", "p2", "p3"], ["EU_MDCG"], top_k=5)
+        self.assertEqual([p.chunk_id for p in out.passages], ["a", "b", "x1", "y1", "z1"])
+        self.assertAlmostEqual(out.best_distance, 0.2)
+
+    def test_duplicate_and_blank_queries_searched_once(self):
+        r = self._retriever(retrieval.RetrievalResult([self._p("a", 0.3)], best_distance=0.3))
+        r.search_many(["q", " q ", ""])
+        self.assertEqual(r.search.call_count, 1)
+
+
 class TestRelevanceGate(unittest.TestCase):
     """Off-topic questions must return nothing, not five weak passages."""
 

@@ -289,10 +289,17 @@ class HealdarRAG:
             self._maybe_reformulate(question_en, history) if history else question_en
         )
 
+        jx_tags = JURISDICTION_MAP[jurisdiction]
         try:
-            found = self._retriever.search(
-                search_query, JURISDICTION_MAP[jurisdiction]
-            )
+            found = self._retriever.search(search_query, jx_tags)
+            # Only a question that passes the relevance gate on its own is
+            # worth planning for -- and planned queries must never be what
+            # lets an off-topic question through.
+            planned = self._plan_queries(search_query, jurisdiction) if found else []
+            if planned:
+                found = self._retriever.search_many([search_query, *planned], jx_tags)
+        except HealdarError:
+            raise
         except Exception as exc:
             # An index failure is NOT "no information exists" -- say so, loudly.
             logger.error("Retrieval failed: %s", exc, exc_info=True)
@@ -514,6 +521,75 @@ class HealdarRAG:
         logger.info("Reformulated: %r -> %r", question_en, rewritten)
         return rewritten
 
+    # Measured on three case-style questions: asking for the regulation's own
+    # wording retrieves the deciding pages (MDCG 2019-11's Rule 11 section for
+    # a retinal-screening classification), while asking for article numbers
+    # made the model guess wrong ones ("Annex VIII Rule 3").
+    _PLAN_PROMPT = (
+        "You are helping search a library of official health-AI regulatory "
+        "documents (EU MDR, IVDR, AI Act and MDCG guidance; US FDA guidance; "
+        "Saudi SFDA, SDAIA and NHIC; UAE and Qatar regulators; WHO; IMDRF).\n\n"
+        "Question{jx}: {question}\n\n"
+        "Write {n} search queries, one per line, that would retrieve the "
+        "passages needed to answer it. Word each query the way the regulation "
+        "or guidance itself would be worded: name the regulatory concept and "
+        "its deciding criteria (for example 'software intended to provide "
+        "information used to take decisions with diagnostic or therapeutic "
+        "purposes classification') rather than guessing article or rule "
+        "numbers. Cover (1) whether the rules apply to this product, (2) the "
+        "specific rule or criteria that decide the answer, and (3) guidance "
+        "with worked examples. Output only the queries."
+    )
+    _JX_LABEL = {
+        "eu": "EU", "sfda": "Saudi Arabia", "ksa": "Saudi Arabia", "uae": "UAE",
+        "qatar": "Qatar", "fda": "United States (FDA)", "usa": "United States (FDA)",
+        "intl": "international bodies (WHO, IMDRF)",
+    }
+
+    def _plan_queries(self, question_en: str, jurisdiction: str = "all") -> list[str]:
+        """
+        Ask the small model which provisions a question depends on.
+
+        A question that describes a case ("AI software that flags diabetic
+        retinopathy -- which class?") is worded nothing like the rule that
+        decides it (MDR Annex VIII, Rule 11), so searching the question alone
+        returned FAQ pages and the answer declined to classify. Planning is
+        optional: on any failure the question is still searched on its own.
+        """
+        if not config.QUERY_PLANNING or config.PLANNED_QUERIES <= 0:
+            return []
+        try:
+            label = self._JX_LABEL.get(jurisdiction)
+            raw = self._chat(
+                model=config.GROQ_MODEL_PLANNER,
+                content=self._PLAN_PROMPT.format(
+                    jx=f" (jurisdiction: {label})" if label else "",
+                    n=config.PLANNED_QUERIES,
+                    question=question_en,
+                ),
+                temperature=0,
+                # gpt-oss reasons before it writes and the reasoning counts
+                # against this budget: at 600 tokens the 20b model returned nothing.
+                max_tokens=1500,
+            )
+        except Exception as exc:
+            logger.warning("Query planning failed, searching the question alone: %s", exc)
+            return []
+        return self._parse_planned(raw, question_en)
+
+    @staticmethod
+    def _parse_planned(raw: str, question_en: str) -> list[str]:
+        out: list[str] = []
+        for line in (raw or "").splitlines():
+            q = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line)
+            q = q.strip().strip("\"'“”").strip()
+            if 3 <= len(q) <= 300 and q.lower() != question_en.strip().lower() and q not in out:
+                out.append(q)
+        out = out[: config.PLANNED_QUERIES]
+        if out:
+            logger.info("Planned queries for %r: %s", question_en, out)
+        return out
+
     # ------------------------------------------------------------------
     # Prompting
     # ------------------------------------------------------------------
@@ -566,19 +642,40 @@ class HealdarRAG:
 
         return (
             "You are Healdar, an expert assistant on health-AI regulatory "
-            "frameworks across the Gulf region, Europe and the United States.\n\n"
+            "frameworks across the Gulf region, Europe and the United States. "
+            "You help people understand the rules and apply them to their own "
+            "products and situations.\n\n"
             f"{history_section}"
-            "Answer the question using ONLY the CONTEXT passages below.\n\n"
+            "Answer the question from the CONTEXT passages below. They are your "
+            "evidence: every rule, requirement, definition or classification "
+            "criterion you rely on must come from them, with a citation.\n\n"
+            "How to answer:\n"
+            "- When the question describes a product or situation (for example "
+            "'which class would this device be?' or 'does this app need "
+            "approval?'), apply the rules in the passages to it. Reason it "
+            "through: name each rule, show how the facts of the case meet or "
+            "miss its conditions, and reach a clear conclusion, such as the most "
+            "likely class. Present it as an assessment ('this would most likely "
+            "be Class IIb, because ...'), not as a formal regulatory decision.\n"
+            "- State the assumptions the conclusion depends on and what would "
+            "change it (for example, 'if the output only informs rather than "
+            "drives the clinical decision, ...').\n"
+            "- You may use general regulatory knowledge to connect or interpret "
+            "the passages, but never as the only basis for a specific "
+            "requirement, class, deadline or article number. If the rule that "
+            "decides the question is not in the passages, say so plainly, mark "
+            "anything you add from memory with '(not in the retrieved "
+            "documents)', and treat the conclusion as provisional.\n"
+            "- If something the question needs is not in the passages, still "
+            "give the best-supported answer from what is there, then say what is "
+            "missing and how it could change the answer.\n\n"
             "Rules:\n"
             "- Cite with the short tag only, e.g. [Source 1]. Never put "
             "filenames, paths or page numbers inside the brackets.\n"
-            "- Cite the specific source for each substantive claim.\n"
+            "- Cite the specific source for each substantive claim and for each "
+            "rule used in your reasoning.\n"
             "- Quote the regulation's own wording for requirements, and name "
-            "the article, clause or section number when the passage gives one.\n"
-            "- If the context does not fully answer the question, say exactly "
-            "what is missing rather than filling the gap from general "
-            "knowledge.\n"
-            "- Do not state a requirement that no passage supports.\n"
+            "the article, clause, rule or section number when the passage gives one.\n"
             "- Some passages may be in Arabic. Read them in Arabic, and when you "
             "rely on one, give its wording in English and mark it "
             "(translated from Arabic).\n"
@@ -587,8 +684,9 @@ class HealdarRAG:
             "Do NOT use tables, headings, horizontal rules, or bold/italic "
             "markup; the answer is shown as plain formatted text.\n"
             "- Finish with a final line, on its own, reading exactly "
-            "'COVERAGE: full' if the context answered the question completely, "
-            "or 'COVERAGE: partial' if it did not.\n\n"
+            "'COVERAGE: full' if the passages were enough to answer (including "
+            "by applying their rules to the case), or 'COVERAGE: partial' if "
+            "something essential was missing.\n\n"
             f"CONTEXT:\n{context}\n\n"
             f"QUESTION: {question}\n\n"
             "ANSWER:"
