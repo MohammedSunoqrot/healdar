@@ -4,7 +4,7 @@ Streamlit frontend.
 
 Theming: Streamlit draws its own widgets from the light and dark palettes in
 .streamlit/config.toml and follows the visitor's system setting (switchable
-from the ⋮ menu → Settings). Healdar's own components — answer card,
+from the ⋮ menu: System / Light / Dark). Healdar's own components — answer card,
 references, notices — take their colours from the inherited text colour via
 CSS color-mix(), so they follow whichever theme is active without the app
 having to know which one that is. (The previous version repainted a "light
@@ -121,7 +121,7 @@ T = {
             "is cited to a document and page; when the documents don't cover a question, "
             "Healdar says so instead of guessing."
         ),
-        "theme_hint":     "Light or dark mode follows your system. Change it any time from ⋮ → Settings.",
+        "theme_hint":     "Light or dark mode follows your system. Switch any time from the ⋮ menu at the top right (System, Light or Dark).",
         "loading":        "Searching the regulatory documents…",
         "loading_index":  "Loading the regulatory index…",
         "lang_label":     "Language",
@@ -175,7 +175,7 @@ T = {
             "فقط من الجهات التنظيمية الخليجية والأوروبية والأمريكية والدولية. كل معلومة موثّقة "
             "بالوثيقة ورقم الصفحة، وعندما لا تغطي الوثائق السؤال يوضّح ذلك بدلاً من التخمين."
         ),
-        "theme_hint":     "يتبع الوضع الفاتح أو الداكن إعدادات جهازك، ويمكن تغييره من ⋮ ← الإعدادات.",
+        "theme_hint":     "يتبع الوضع الفاتح أو الداكن إعدادات جهازك، ويمكنك تغييره في أي وقت من قائمة ⋮ أعلى الصفحة (System / Light / Dark).",
         "loading":        "جارٍ البحث في الوثائق التنظيمية…",
         "loading_index":  "جارٍ تحميل فهرس الوثائق…",
         "lang_label":     "اللغة",

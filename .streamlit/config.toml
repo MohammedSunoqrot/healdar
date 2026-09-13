@@ -3,7 +3,7 @@
 # Theming: both a light and a dark palette are defined, so Streamlit's own
 # widgets (buttons, inputs, selects, the header bar) are drawn in the right
 # colours for each. The app follows the visitor's system setting by default;
-# it can be switched from the ⋮ menu → Settings. Healdar's custom components
+# it can be switched from the ⋮ menu (System / Light / Dark). Healdar's custom components
 # (answer cards, references, notices) derive their colours from the inherited
 # text colour, so they follow whichever theme is active without any Python-side
 # theme tracking.
@@ -43,8 +43,10 @@ backgroundColor = "#131826"
 secondaryBackgroundColor = "#1A2030"
 
 [client]
-# Hide developer-only toolbar entries (e.g. "Deploy") from visitors.
-toolbarMode = "minimal"
+# Hide developer-only toolbar entries (e.g. "Deploy") from visitors, but keep
+# the ⋮ menu: its System / Light / Dark switch is the only theme control. "minimal"
+# removed the menu entirely, leaving visitors stuck on their system theme.
+toolbarMode = "viewer"
 
 [browser]
 gatherUsageStats = false

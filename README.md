@@ -51,7 +51,7 @@ properties matter more than fluency here:
 | **Relevance shown** | Every reference shows how well it matched; click it to read the passage |
 | **Export** | PDF and Word, with the same citation numbers as the answer |
 | **Your session** | A private summary of *your own* questions this session — nothing is shown to other visitors |
-| **Light & dark** | Follows your system setting; switch any time from ⋮ → Settings |
+| **Light & dark** | Follows your system setting; switch any time from the ⋮ menu (top right): System, Light or Dark |
 | **Version shown** | The sidebar shows the running version and its release date |
 
 ---

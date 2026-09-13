@@ -48,8 +48,8 @@ and a third would have produced wrong answers rather than no answers.
   repainted a "light mode" with CSS overrides that Streamlit's own widgets never
   received — hence black buttons, a black header bar, an unreadable comparison toggle and
   a dark footer block. Both palettes are now native Streamlit themes, the app follows the
-  system setting (switchable from ⋮ → Settings), and Healdar's custom components derive
-  their colours from the active theme.
+  system setting (switchable from the ⋮ menu: System, Light or Dark), and Healdar's
+  custom components derive their colours from the active theme.
 - **Answers read as formatted text.** Models write Markdown whether asked to or not; the
   old renderer escaped it and showed raw `**`, `###` and table pipes. A new
   `formatting.py` parses answers once and renders headings, lists, emphasis and tables
