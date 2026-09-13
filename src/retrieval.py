@@ -91,9 +91,22 @@ class Retriever:
     this module (and running unit tests) costs nothing.
     """
 
-    def __init__(self, collection, *, hybrid: bool | None = None) -> None:
+    def __init__(
+        self,
+        collection,
+        *,
+        hybrid: bool | None = None,
+        embedding_function=None,
+    ) -> None:
         self._collection = collection
         self._hybrid = config.HYBRID_SEARCH if hybrid is None else hybrid
+        # Needed to score lexical-only hits against the query. Chroma exposes
+        # the collection's function only as a private attribute, so accept an
+        # explicit one and fall back — if neither works, hybrid search degrades
+        # to dense-only rather than failing.
+        self._ef = embedding_function or getattr(
+            collection, "_embedding_function", None
+        )
         self._bm25 = None
         self._bm25_ids: list[str] = []
         self._bm25_jx: list[str] = []
@@ -199,14 +212,14 @@ class Retriever:
         fetching their stored embeddings and scoring them against the query.
         """
         ids = list(chunk_ids)
-        if not ids:
+        if not ids or self._ef is None:
             return []
         try:
             got = self._collection.get(
                 ids=ids, include=["documents", "metadatas", "embeddings"]
             )
             q_vec = np.asarray(
-                self._collection._embedding_function([query])[0], dtype=float
+                self._ef([query])[0], dtype=float
             )
             q_norm = np.linalg.norm(q_vec) or 1.0
         except Exception as exc:
@@ -255,7 +268,7 @@ class Retriever:
                        searches everything.
         balance:       cap passages per jurisdiction. Defaults to on when
                        searching more than one jurisdiction, so that the
-                       largest corpus (EU, 49% of chunks) cannot crowd out the
+                       largest corpus (EU, ~47% of chunks) cannot crowd out the
                        rest of a cross-jurisdiction answer.
         """
         jurisdictions = list(jurisdictions or [])
@@ -306,7 +319,7 @@ class Retriever:
         contribute, then backfill from the remainder if that leaves us short.
 
         The cap is deliberately SOFT. Its job is to guarantee that a dominant
-        corpus (EU is ~49% of the chunks) cannot shut smaller jurisdictions out
+        corpus (EU is ~47% of the chunks) cannot shut smaller jurisdictions out
         of a cross-jurisdiction answer -- not to leave context slots empty. When
         a question genuinely only has EU material, five EU passages beat two EU
         passages plus three wasted slots, so the backfill is allowed past the

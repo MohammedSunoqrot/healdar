@@ -14,7 +14,7 @@ license: apache-2.0
 
 **Bilingual AI assistant for navigating health AI regulations across the Gulf region, Europe, and the United States.**
 
-Healdar answers regulatory questions in **English and Arabic**, grounded in 60 official
+Healdar answers regulatory questions in **English and Arabic**, grounded in 59 official
 documents from SFDA, SDAIA, NHIC, UAE DoH & DHA, Qatar MOPH/MCIT/NCSA, the EU, the US FDA,
 and the WHO — with a citation and a page number for every claim.
 
@@ -40,7 +40,7 @@ properties matter more than fluency here:
 | **Bilingual** | English and Arabic UI; Arabic queries are translated for retrieval, then answered in Arabic |
 | **7 jurisdictions** | 🇸🇦 Saudi Arabia · 🇦🇪 UAE · 🇶🇦 Qatar · 🇪🇺 EU · 🇺🇸 US · 🌐 International (WHO) · 🌍 All |
 | **Hybrid retrieval** | Dense embeddings **+** BM25, fused with Reciprocal Rank Fusion — so "Article 120" and "MDS-G010" are found by exact token, not just by meaning |
-| **Balanced comparison** | In "all jurisdictions" mode, no single corpus can crowd out the others (the EU alone is 53% of the chunks) |
+| **Balanced comparison** | In "all jurisdictions" mode, no single corpus can crowd out the others (the EU alone is 47% of the chunks) |
 | **Comparison mode** | Two jurisdictions side by side, queried in parallel |
 | **Relevance shown** | Each citation displays how well it actually matched |
 | **Export** | Download answers as PDF or Word (.docx) |
@@ -60,7 +60,7 @@ User question (EN or AR)
         │
         ▼
 ┌────────────────────────────────────────────────┐
-│  HYBRID RETRIEVAL over 3,849 chunks            │
+│  HYBRID RETRIEVAL over 3,404 chunks            │
 │    dense    ChromaDB + all-MiniLM-L6-v2        │
 │    lexical  BM25 over the same chunks          │
 │    fuse     Reciprocal Rank Fusion             │
@@ -108,7 +108,7 @@ Healdar/
 │   ├── raw_docs/               # source PDFs — NOT committed
 │   └── runtime/                # analytics DB — NOT committed
 │
-├── tests/                  # 163 tests
+├── tests/                  # 167 tests
 └── .github/workflows/ci.yml
 ```
 
@@ -141,7 +141,7 @@ Open <http://localhost:8501>.
 > **Why `git lfs pull` matters.** The vector store is LFS-tracked. Without it you get
 > ~130-byte pointer stubs, and Chroma opens fine, reports the right document count, and
 > then throws on the first query. Healdar now detects this and rebuilds the index from
-> `chunks.json` automatically — but pulling properly is faster than re-embedding 3,849
+> `chunks.json` automatically — but pulling properly is faster than re-embedding 3,404
 > chunks.
 
 ### Rebuilding the corpus
@@ -155,7 +155,7 @@ python src/embed.py --rebuild         # chunks → vector store
 ### Running the checks
 
 ```bash
-pytest tests -q                       # 163 unit tests
+pytest tests -q                       # 167 unit tests
 python eval/run_eval.py               # retrieval metrics (no API key needed)
 python eval/run_eval.py --full        # also generates answers (uses Groq)
 ruff check src tests eval scripts
@@ -200,12 +200,12 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker, Streamlit Cloud, and HuggingFace 
 
 ## Coverage
 
-60 documents, 3,849 chunks.
+59 documents, 3,404 chunks.
 
 | Jurisdiction | Bodies | Documents |
 |---|---|---|
 | 🇸🇦 Saudi Arabia | SFDA, SDAIA, NHIC | 18 |
-| 🇪🇺 European Union | MDR, IVDR, AI Act, MDCG, GPAI Code | 14 |
+| 🇪🇺 European Union | MDR, IVDR, AI Act, MDCG, GPAI Code | 13 |
 | 🇺🇸 United States | FDA | 9 |
 | 🇦🇪 UAE | DoH Abu Dhabi, DHA Dubai, National | 10 |
 | 🇶🇦 Qatar | MOPH, MCIT, NCSA | 8 |

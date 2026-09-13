@@ -100,7 +100,7 @@ HYBRID_SEARCH  = _env_bool("HEALDAR_HYBRID", True)
 RRF_K          = _env_int("HEALDAR_RRF_K", 60)   # reciprocal-rank-fusion constant
 
 # In "all jurisdictions" mode, cap how many passages one jurisdiction may take.
-# EU is 49% of the corpus, so an unbalanced top-5 is usually 4x EU.
+# EU is ~47% of the corpus, so an unbalanced top-5 is usually 4x EU.
 MAX_PER_JURISDICTION = _env_int("HEALDAR_MAX_PER_JX", 2)
 
 # ---------------------------------------------------------------------------

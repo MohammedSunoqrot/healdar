@@ -476,9 +476,29 @@ def main() -> int:
         for m in missing_manual:
             print(f"    - {m['label']}\n      {m['why']}")
 
+    stray = orphans()
+    if stray:
+        print("\n  NOT IN MANIFEST -- would be ingested; remove or add to DOCS:")
+        for p in stray:
+            print(f"    {p.relative_to(BASE_DIR)}")
+
     print("=" * 70)
     print("\nNext: python src/ingest.py && python src/embed.py --rebuild\n")
-    return 1 if (results["fail"] or results["mismatch"]) else 0
+    return 1 if (results["fail"] or results["mismatch"] or stray) else 0
+
+
+def orphans() -> list[Path]:
+    """
+    PDFs on disk that the manifest does not list.
+
+    The manifest is the authoritative corpus. An unlisted file is usually a
+    superseded version left behind after a refresh -- exactly how the 2023 MDR
+    consolidation ended up ingested next to the 2026 one, both citeable.
+    """
+    if not BASE_DIR.exists():
+        return []
+    listed = {d.path.resolve() for d in DOCS}
+    return sorted(p for p in BASE_DIR.rglob("*.pdf") if p.resolve() not in listed)
 
 
 if __name__ == "__main__":

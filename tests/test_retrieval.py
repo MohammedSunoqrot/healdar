@@ -132,7 +132,7 @@ class TestJurisdictionFilter(unittest.TestCase):
 
 
 class TestBalancing(unittest.TestCase):
-    """EU is ~49% of the corpus; it must not crowd out an 'all' answer."""
+    """EU is ~47% of the corpus; it must not crowd out an 'all' answer."""
 
     def test_weaker_jurisdiction_still_gets_a_slot(self):
         """A dominant corpus must not shut a smaller one out entirely."""

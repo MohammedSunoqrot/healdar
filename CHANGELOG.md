@@ -50,10 +50,11 @@ would have produced wrong answers rather than no answers.
 - Corrected the dates on four more files whose names misstated their actual version.
 - The downloader now asserts each PDF contains an expected identifier on its opening
   pages, so a silent substitution upstream fails at download instead of months later.
+- The download manifest is now authoritative: any PDF on disk it does not list is flagged, and a CI test fails if an unlisted file is ingested. That is how the superseded 2023 MDR text briefly sat in the index beside the 2026 consolidation, both citeable.
 
 ### Added — corpus
 
-Grew from 27 documents / 1,978 chunks to **60 documents / 3,849 chunks**.
+Grew from 27 documents / 1,978 chunks to **59 documents / 3,404 chunks**.
 
 - **`KSA_SDAIA/` was empty** while the README advertised SDAIA coverage and the code had
   a `KSA_SDAIA` jurisdiction — the `ksa` alias silently behaved like `sfda`. Added all 8
@@ -62,7 +63,7 @@ Grew from 27 documents / 1,978 chunks to **60 documents / 3,849 chunks**.
   the secondary-use rules. The old script's "SDAIA blocks bots" premise was wrong; the
   WAF just needs a `Referer`.
 - **EU IVDR 2017/746** — absent entirely, which left the already-ingested MDCG 2025-6
-  MDR/IVDR/AI-Act FAQ partly uninterpretable. Refreshed the MDR to the 2026-01-01
+  MDR/IVDR/AI-Act FAQ partly uninterpretable. Replaced the 2023 MDR text with the 2026-01-01
   consolidation.
 - **FDA Clinical Decision Support Software (2026)** — the guidance that decides whether
   clinical AI is a regulated device at all.
@@ -78,7 +79,7 @@ Grew from 27 documents / 1,978 chunks to **60 documents / 3,849 chunks**.
   Regulatory questions turn on exact tokens — "Article 120", "MDS-G010", "Annex VIII" —
   that embeddings blur. Lexical-only hits are scored against the query vector so the
   relevance gate applies uniformly.
-- **Jurisdiction balancing.** The EU is 53% of the corpus and was crowding out every
+- **Jurisdiction balancing.** The EU is 47% of the corpus and was crowding out every
   other body in "all jurisdictions" mode. A soft per-jurisdiction cap now guarantees
   smaller corpora a slot without wasting context when only one has material.
 - **Coverage signalling.** Answers carry a self-assessed `full`/`partial` marker; the UI
@@ -93,7 +94,7 @@ Grew from 27 documents / 1,978 chunks to **60 documents / 3,849 chunks**.
   deliberate known failure rather than deleted to keep the score green.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 163. Two test files had pointed at a `code/` directory that has not existed
+- Tests: 48 → 167. Two test files had pointed at a `code/` directory that has not existed
   since the rename and only imported by accident; the Streamlit mock could not load
   `app.py` at all.
 - `src/config.py` centralises every tunable, all environment-overridable.
