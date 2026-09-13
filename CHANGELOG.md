@@ -140,7 +140,11 @@ regulators.**
   summed rank let half-matches push out the Rule 11 page); MDCG 2019-11's Rule 11 pages
   now reach both classification test questions. The user's own question still alone
   decides whether anything relevant exists, so off-topic questions are refused as before.
-- **Jurisdiction balancing** with a soft cap per jurisdiction.
+- **Jurisdiction balancing** with a soft cap per jurisdiction — which steps aside when
+  the question names its jurisdiction. With the selector on "All", *"… under the EU
+  MDR"* had the EU capped at two passages and the rest filled with FDA and SFDA pages,
+  dropping the Rule 11 pages; such a question now searches the jurisdictions it names.
+  An explicit selection is never overridden.
 - **Coverage signalling**: a self-assessed `full`/`partial` marker drives a caution
   banner, and each citation shows how well it matched.
 
@@ -151,7 +155,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 236.
+- Tests: 48 → 244.
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

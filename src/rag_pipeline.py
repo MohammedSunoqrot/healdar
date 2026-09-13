@@ -77,6 +77,29 @@ JURISDICTION_GROUPS: dict[str, str] = {
 # Errors
 # ---------------------------------------------------------------------------
 
+# A question that names its jurisdiction ("... under the EU MDR") is about that
+# jurisdiction even when the selector is left on "All". Balancing across every
+# jurisdiction then capped the EU at two passages and filled the rest with FDA
+# and SFDA pages -- dropping the Rule 11 pages a classification answer needs.
+# Acronyms match case-sensitively so that "who" and "us" do not count.
+_NAMED_JX: dict[str, re.Pattern] = {
+    "eu": re.compile(
+        r"(?<!\w)(?:EU|E\.U\.|MDR|IVDR|MDCG|AI Act|CE[- ]mark\w*"
+        r"|(?i:european union|europe|notified bod(?:y|ies)))(?!\w)"
+    ),
+    "sfda": re.compile(r"(?<!\w)(?:SFDA|SDAIA|NHIC|KSA|(?i:saudi))(?!\w)"),
+    "uae": re.compile(
+        r"(?<!\w)(?:UAE|DoH|DHA|MOHAP"
+        r"|(?i:united arab emirates|emirates|emirati|abu dhabi|dubai))(?!\w)"
+    ),
+    "qatar": re.compile(r"(?<!\w)(?:MOPH|MCIT|NCSA|(?i:qatar|qatari))(?!\w)"),
+    "fda": re.compile(
+        r"(?<!\w)(?:FDA|USA|U\.S\.|US|PMA|510\(k\)|(?i:united states|de novo))(?!\w)"
+    ),
+    "intl": re.compile(r"(?<!\w)(?:WHO|IMDRF|(?i:world health organi[sz]ation))(?!\w)"),
+}
+
+
 class HealdarError(Exception):
     """Base class for errors the UI knows how to present."""
 
@@ -290,12 +313,19 @@ class HealdarRAG:
         )
 
         jx_tags = JURISDICTION_MAP[jurisdiction]
+        plan_jx = jurisdiction
+        if jurisdiction == "all":
+            named = self._named_jurisdictions(search_query)
+            if named:
+                jx_tags = [tag for key in named for tag in JURISDICTION_MAP[key]]
+                plan_jx = named[0] if len(named) == 1 else "all"
+                logger.info("Question names %s: searching those jurisdictions", named)
         try:
             found = self._retriever.search(search_query, jx_tags)
             # Only a question that passes the relevance gate on its own is
             # worth planning for -- and planned queries must never be what
             # lets an off-topic question through.
-            planned = self._plan_queries(search_query, jurisdiction) if found else []
+            planned = self._plan_queries(search_query, plan_jx) if found else []
             if planned:
                 found = self._retriever.search_many([search_query, *planned], jx_tags)
         except HealdarError:
@@ -520,6 +550,11 @@ class HealdarRAG:
             return question_en
         logger.info("Reformulated: %r -> %r", question_en, rewritten)
         return rewritten
+
+    @staticmethod
+    def _named_jurisdictions(question_en: str) -> list[str]:
+        """Jurisdiction keys the question itself names, in JURISDICTION_MAP terms."""
+        return [key for key, pattern in _NAMED_JX.items() if pattern.search(question_en)]
 
     # Measured on three case-style questions: asking for the regulation's own
     # wording retrieves the deciding pages (MDCG 2019-11's Rule 11 section for

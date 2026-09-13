@@ -435,6 +435,50 @@ class TestAskWithPlanning(unittest.TestCase):
         self.assertEqual(answer.coverage, "full")
 
 
+class TestNamedJurisdiction(unittest.TestCase):
+    """A question that names its jurisdiction is searched there, even in "All" mode."""
+
+    def named(self, q):
+        return HealdarRAG._named_jurisdictions(q)
+
+    def test_eu_mdr(self):
+        self.assertEqual(self.named("Suggest its classification under the EU MDR."), ["eu"])
+
+    def test_saudi_regulator(self):
+        self.assertEqual(self.named("How does SFDA regulate AI-based SaMD?"), ["sfda"])
+        self.assertEqual(self.named("What do Saudi hospitals need?"), ["sfda"])
+
+    def test_us_pathways(self):
+        self.assertEqual(self.named("Is a 510(k) enough in the US?"), ["fda"])
+
+    def test_comparison_names_both(self):
+        self.assertEqual(self.named("Compare the FDA and the EU AI Act on this."), ["eu", "fda"])
+
+    def test_general_question_names_none(self):
+        self.assertEqual(self.named("What are post-market surveillance requirements for AI devices?"), [])
+
+    def test_everyday_words_are_not_acronyms(self):
+        self.assertEqual(self.named("Who should tell us what the rules are?"), [])
+
+    def test_all_mode_narrows_to_the_named_jurisdiction(self):
+        from unittest import mock
+        rag = _bare_rag()
+        rag.answer_model = "answer-model"
+        rag._retriever = mock.MagicMock()
+        rag._retriever.search.return_value = RetrievalResult([], quality="no_match")
+        rag.ask("Which class is this retinal screening software under the EU MDR?", "all")
+        self.assertEqual(rag._retriever.search.call_args[0][1], rp.JURISDICTION_MAP["eu"])
+
+    def test_explicit_selection_is_not_overridden(self):
+        from unittest import mock
+        rag = _bare_rag()
+        rag.answer_model = "answer-model"
+        rag._retriever = mock.MagicMock()
+        rag._retriever.search.return_value = RetrievalResult([], quality="no_match")
+        rag.ask("How does this compare with the EU MDR?", "sfda")
+        self.assertEqual(rag._retriever.search.call_args[0][1], rp.JURISDICTION_MAP["sfda"])
+
+
 class TestPromptAllowsReasoning(unittest.TestCase):
     """The model should apply the rules it is given, not refuse to conclude."""
 
