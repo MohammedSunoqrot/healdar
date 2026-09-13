@@ -4,23 +4,34 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+.ruff_cache/
 tests/
+eval/
+docs/
+scripts/
 
 # Secrets — never copy into the image
-code/.env
 .env
+.streamlit/secrets.toml
+
+# Runtime data (per-deployment; must not be baked in)
+data/runtime/
+
+# Source PDFs — the vector store and chunks.json are the shipped artefacts
+data/raw_docs/
 
 # Local OS / editor artefacts
 .DS_Store
 Thumbs.db
 *.log
+.idea/
+.vscode/
 
 # Git
 .git/
+.gitattributes
 .gitignore
+.github/
 
-# Windows launch script (not needed in container)
+# Windows launch script (not needed in a Linux container)
 run.bat
-
-# Source PDFs (vectorstore is already pre-built and copied separately)
-data/raw_docs/

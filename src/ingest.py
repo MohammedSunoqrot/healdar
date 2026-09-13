@@ -13,7 +13,7 @@ Flow:
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # PDF extraction — prefer PyMuPDF (faster, more accurate), fall back to pypdf
@@ -62,12 +62,12 @@ except ImportError:
     )
 
 # ---------------------------------------------------------------------------
-# Resolve project root relative to this script's location
+# Paths (shared with the rest of the app via config)
 # ---------------------------------------------------------------------------
-SCRIPT_DIR = Path(__file__).resolve().parent        # src/
-PROJECT_ROOT = SCRIPT_DIR.parent                    # Healdar/
-RAW_DOCS_DIR = PROJECT_ROOT / "data" / "raw_docs"
-OUTPUT_FILE = PROJECT_ROOT / "data" / "processed" / "chunks.json"
+import config
+
+RAW_DOCS_DIR = config.RAW_DOCS_DIR
+OUTPUT_FILE = config.CHUNKS_FILE
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -84,12 +84,12 @@ logger = logging.getLogger(__name__)
 # PDF text extraction
 # ---------------------------------------------------------------------------
 
-def extract_text_from_pdf(pdf_path: Path) -> Dict[int, str]:
+def extract_text_from_pdf(pdf_path: Path) -> dict[int, str]:
     """
     Return {page_number: text} for every non-empty page in the PDF.
     Page numbers are 1-indexed. Returns {} on failure.
     """
-    page_texts: Dict[int, str] = {}
+    page_texts: dict[int, str] = {}
 
     try:
         if PDF_EXTRACTOR == "fitz":
@@ -120,7 +120,7 @@ def extract_text_from_pdf(pdf_path: Path) -> Dict[int, str]:
 # Chunking
 # ---------------------------------------------------------------------------
 
-def chunk_page(text: str) -> List[str]:
+def chunk_page(text: str) -> list[str]:
     """Split a single page's text into token-sized chunks."""
     try:
         return _SPLITTER.split_text(text)
@@ -136,12 +136,12 @@ def chunk_page(text: str) -> List[str]:
 def process_pdf(
     pdf_path: Path,
     jurisdiction: str,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     Extract, chunk, and tag all text from one PDF.
     Returns a list of chunk dicts ready for JSON serialisation.
     """
-    records: List[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
 
     page_texts = extract_text_from_pdf(pdf_path)
     if not page_texts:
@@ -178,10 +178,10 @@ def ingest() -> None:
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    all_chunks: List[Dict[str, Any]] = []
+    all_chunks: list[dict[str, Any]] = []
 
     # Statistics tracked per jurisdiction
-    stats: Dict[str, Dict[str, int]] = {}
+    stats: dict[str, dict[str, int]] = {}
     total_pdfs = 0
     failed_pdfs = 0
 

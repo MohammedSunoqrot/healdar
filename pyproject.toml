@@ -1,0 +1,63 @@
+[project]
+name = "healdar"
+version = "2.0.0"
+description = "Bilingual health-AI regulatory navigator (RAG over official regulatory documents)"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests", "eval", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # import sorting
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "C4",    # comprehensions
+    "SIM",   # simplify
+    "RUF",   # ruff-specific
+]
+ignore = [
+    # This codebase aligns assignments and trailing comments into columns for
+    # readability (see the jurisdiction tables and the theme palettes). Ruff
+    # counts the padding as whitespace errors; the alignment is deliberate.
+    "E241",  # multiple spaces after comma
+    "E221",  # multiple spaces before operator
+    "E203",  # whitespace before punctuation
+    # Test fixtures are intentionally class-level constants.
+    "RUF012",
+    # Broad excepts are deliberate and individually commented: analytics and
+    # session persistence must never take the app down, and the vector-store
+    # loader has to catch whatever Chroma throws in order to rebuild.
+    "BLE001",
+    # This is a bilingual app whose whole job involves Arabic text and
+    # typographic punctuation from PDFs. Flagging every en dash and every
+    # Arabic character as "ambiguous" is pure noise here.
+    "RUF001", "RUF002", "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests import modules for their side effects and shadow names freely, and
+# their fixture tables are aligned into columns like the ones in src/app.py.
+"tests/*" = ["E402", "F401", "E501"]
+# sys.path has to be set before the local imports in these entry points.
+"eval/*" = ["E402"]
+# The bilingual UI string table and the CSS blocks are wide by nature:
+# wrapping them would hurt readability rather than help it.
+"src/app.py" = ["E402", "E501"]
+# The document manifest is one long row per regulatory source, URLs included.
+"scripts/download_docs.py" = ["E501"]
+# reportlab/docx style declarations are aligned into columns.
+"src/export.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Quiet, but show which test failed and why.
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "error::DeprecationWarning:src.*",
+]

@@ -1,130 +1,90 @@
 # Healdar — Deployment Guide
 
-Two supported targets: **Streamlit Cloud** (easiest, free tier available) and **Docker** (self-hosted, full control).
+Three supported targets: **Docker** (self-hosted, full control), **HuggingFace Spaces**,
+and **Streamlit Cloud**.
 
 ---
 
-## Prerequisites — build the vectorstore locally first
+## Before you deploy
 
-The vectorstore must be built before deploying. Run these once from the project root:
+### 1. Pull the Git LFS objects
+
+The vector store is LFS-tracked. A clone without `git lfs pull` yields ~130-byte pointer
+stubs. Chroma will open them, report the correct document count, and then throw on the
+first query — which, before this was handled, surfaced to users as
+*"no relevant information found"* for **every** question.
 
 ```bash
-python src/ingest.py   # PDF → data/chunks.json
-python src/embed.py    # chunks.json → data/vectorstore/
+git lfs pull
+python -c "import sys; sys.path.insert(0,'src'); import config, vectorstore; \
+print(vectorstore.find_lfs_pointers(config.DATA_DIR) or 'no pointer stubs')"
 ```
 
-Both output files (`data/chunks.json` and `data/vectorstore/`) must be committed to Git **or** copied into the Docker image.
+Healdar now detects this and rebuilds from `chunks.json` automatically, but rebuilding
+takes a minute or two — pulling properly is faster.
 
----
-
-## Option 1 — Streamlit Cloud
-
-Streamlit Cloud hosts Streamlit apps for free (public repos) or on a paid plan (private repos).
-
-### Steps
-
-**1. Push to GitHub**
+### 2. Run the checks
 
 ```bash
-git init
-git add .
-git commit -m "Initial Healdar commit"
-git remote add origin https://github.com/<you>/healdar.git
-git push -u origin main
+pytest tests -q
+python eval/run_eval.py
 ```
 
-Make sure `data/vectorstore/` and `data/chunks.json` are committed (they are not large — ~33 MB total).
+`./deploy.sh` does both for you and refuses to push if either fails.
 
-Add this to `.gitignore` to protect your secrets:
-```
-src/.env
-.streamlit/secrets.toml
-```
+### 3. Build the corpus (only if you changed the documents)
 
-**2. Connect to Streamlit Cloud**
-
-1. Go to [share.streamlit.io](https://share.streamlit.io) and sign in with GitHub
-2. Click **New app** → select your repo → set **Main file path** to `src/app.py`
-3. Click **Advanced settings** → **Secrets** and paste:
-
-```toml
-GROQ_API_KEY = "gsk_your_key_here"
+```bash
+python scripts/download_docs.py    # fetch + validate source PDFs
+python src/ingest.py               # PDFs  → data/processed/chunks.json
+python src/embed.py --rebuild      # chunks → data/processed/vectorstore/
 ```
 
-4. Click **Deploy**
-
-### Notes
-
-- First deploy downloads the sentence-transformers model (~90 MB) — expect ~3 min cold start
-- Free tier: 1 GB RAM, 1 CPU. Healdar fits comfortably (model + vectorstore ≈ 400 MB)
-- The app sleeps after inactivity; first request after sleep takes ~10 s to wake
+Commit both `data/processed/chunks.json` and `data/processed/vectorstore/`.
 
 ---
 
-## Option 2 — Docker
-
-### Build
+## Option 1 — Docker
 
 ```bash
 docker build -t healdar .
+docker run -d --name healdar -p 8501:8501 -e GROQ_API_KEY=gsk_your_key healdar
 ```
 
-Build time: ~5 min (downloads torch CPU ~250 MB + other packages).
-Final image size: ~1.5 GB.
+Then open <http://localhost:8501>.
 
-### Run
+The build verifies the vector store and repairs it from `chunks.json` if needed, and warms
+the embedding model into the image — so a cold container serves its first request
+immediately instead of downloading ~90 MB of weights mid-query. Build time ~6 min, final
+image ~1.5 GB.
+
+With an env file (never commit it):
 
 ```bash
-docker run -d \
-  --name healdar \
-  -p 8501:8501 \
-  -e GROQ_API_KEY=gsk_your_key_here \
-  healdar
+docker run -d --name healdar -p 8501:8501 --env-file .env healdar
 ```
 
-Then open `http://localhost:8501`.
-
-Or use a `.env` file (never commit it):
+To keep analytics across restarts, mount the runtime directory:
 
 ```bash
-docker run -d --name healdar -p 8501:8501 --env-file src/.env healdar
+docker run -d --name healdar -p 8501:8501 --env-file .env \
+  -v healdar-runtime:/app/data/runtime healdar
 ```
 
-### Stop / restart
+The container runs as an unprivileged user (`uid 10001`).
+
+### On a cloud VM
 
 ```bash
-docker stop healdar
-docker start healdar
-docker logs healdar      # view logs
+curl -fsSL https://get.docker.com | sh
+git clone https://github.com/MohammedSunoqrot/healdar.git && cd healdar
+git lfs pull
+docker build -t healdar .
+docker run -d --restart=unless-stopped -p 8501:8501 \
+  -e GROQ_API_KEY=gsk_your_key healdar
 ```
 
-### Deploy to a cloud VM (e.g. AWS EC2 / Azure VM / DigitalOcean Droplet)
-
-1. SSH into the VM
-2. Install Docker: `curl -fsSL https://get.docker.com | sh`
-3. Copy the image (or build on the VM):
-   ```bash
-   # Option A — build on VM (clone repo first)
-   git clone https://github.com/<you>/healdar.git && cd healdar
-   docker build -t healdar .
-
-   # Option B — push image from local machine
-   docker tag healdar <dockerhub-user>/healdar
-   docker push <dockerhub-user>/healdar
-   # On VM:
-   docker pull <dockerhub-user>/healdar
-   docker tag <dockerhub-user>/healdar healdar
-   ```
-4. Run with the key:
-   ```bash
-   docker run -d --restart=unless-stopped \
-     -p 8501:8501 \
-     -e GROQ_API_KEY=gsk_your_key_here \
-     healdar
-   ```
-5. Open port 8501 in the VM's security group / firewall
-
-To serve on port 80/443 with HTTPS, put nginx in front:
+Put nginx in front for HTTPS:
 
 ```nginx
 server {
@@ -142,21 +102,92 @@ server {
 
 ---
 
-## Environment variables reference
+## Option 2 — HuggingFace Spaces
 
-| Variable | Required | Description |
+The Space is **public**. `deploy.sh` therefore treats publishing as opt-in:
+
+```bash
+./deploy.sh          # tests + eval, then push to GitHub only
+./deploy.sh --hf     # ... and publish to the public Space (asks to confirm)
+```
+
+`--hf` refuses to run from any branch other than `main`.
+
+In **Settings → Variables and secrets**, add:
+
+| Name | Value |
+|---|---|
+| `GROQ_API_KEY` | `gsk_your_key_here` |
+
+Recommended for a public Space:
+
+| Name | Value | Why |
 |---|---|---|
-| `GROQ_API_KEY` | ✅ | Groq API key from [console.groq.com](https://console.groq.com) |
+| `HEALDAR_RATE_LIMIT_QUERIES` | `20` | Anyone who opens the page spends your API quota |
+| `HEALDAR_PERSIST_SESSION` | `0` | Default. The history file is process-wide, not per-visitor |
+| `HEALDAR_ANALYTICS_QUESTIONS` | `0` | Default. Questions can carry sensitive detail |
+
+Notes:
+
+- **Push LFS objects to the Space's own storage.** HuggingFace has separate LFS storage
+  from GitHub; if the objects never reach it, the Space checks out pointer stubs. The
+  startup integrity check will rebuild from `chunks.json`, but the first request will be
+  slow. Verify with `git lfs push hf main --all`.
+- Do **not** set `HF_HUB_OFFLINE` — the embedding model must be downloadable on cold start.
+- The filesystem is ephemeral: `analytics.db` resets on every restart.
 
 ---
 
-## Re-ingesting documents
+## Option 3 — Streamlit Cloud
 
-To add new PDFs, copy them into `data/raw_docs/<jurisdiction>/` then re-run:
+1. Push to GitHub.
+2. [share.streamlit.io](https://share.streamlit.io) → **New app** → set **Main file path**
+   to `src/app.py`.
+3. **Advanced settings → Secrets**:
 
-```bash
-python src/ingest.py
-python src/embed.py
+```toml
+GROQ_API_KEY = "gsk_your_key_here"
 ```
 
-For Docker, rebuild the image after re-ingesting. For Streamlit Cloud, commit the updated `data/` files and push — Streamlit will auto-redeploy.
+First deploy downloads the embedding model (~90 MB); expect a ~3 min cold start. The free
+tier gives 1 GB RAM — the model plus the vector store sit around 500 MB. The filesystem is
+ephemeral here too.
+
+---
+
+## Environment variables
+
+`GROQ_API_KEY` is the only required one. Everything else has a working default — see
+[.env.example](.env.example) for the annotated list, and the table in
+[README.md](README.md#configuration) for the ones worth tuning.
+
+---
+
+## When something breaks
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Every question answers "no relevant material found" | Vector store is pointer stubs or corrupt | `git lfs pull`, or `python src/embed.py --rebuild`. The app self-heals if `HEALDAR_AUTO_REBUILD=1` (the default). |
+| "The configured language model was rejected" | Groq retired the model | Set `GROQ_MODEL_ANSWER` to a current model from [the model list](https://console.groq.com/docs/models) |
+| "Healdar is temporarily unavailable" on load | Missing `GROQ_API_KEY`, or the index could not be opened or rebuilt | The card shows the underlying error; check the container logs |
+| Rate-limit warnings under load | Groq free-tier quota | Set `HEALDAR_RATE_LIMIT_QUERIES`, or upgrade the Groq plan |
+| Answers are hedged or refused too often | Relevance gate too tight for your corpus | Raise `HEALDAR_MAX_DISTANCE`, then re-run `python eval/run_eval.py` to confirm off-topic questions are still refused |
+
+---
+
+## Updating the corpus
+
+Regulations are revised. `docs/document-research.md` records each document's version and
+publication date. To refresh:
+
+1. Update the URL and `expect` string in `scripts/download_docs.py`.
+2. `python scripts/download_docs.py --force --only <substring>`
+3. `python src/ingest.py && python src/embed.py --rebuild`
+4. `python eval/run_eval.py` — confirm nothing regressed.
+5. Commit `chunks.json` and `vectorstore/`, then deploy.
+
+The downloader asserts that each PDF contains an expected identifier on its opening pages.
+That check exists because two files in this corpus were named as AI guidance while actually
+containing general-wellness and spectacle-frame UDI text — a mislabelled source is worse
+than a missing one, because retrieval surfaces it under the wrong question with a citation
+that looks authoritative.

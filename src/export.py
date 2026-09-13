@@ -14,6 +14,7 @@ import io
 import re
 from datetime import datetime
 
+import config
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -21,7 +22,7 @@ from datetime import datetime
 
 def _clean_citations(text: str) -> str:
     """Replace [Source N] tags with plain (N) for text-format export."""
-    return re.sub(r'\[Source\s*(\d+)[^\]]*\]', r'(\1)', text, flags=re.IGNORECASE)
+    return config.CITATION_RE.sub(r'(\1)', text)
 
 
 def _safe_filename(jx: str) -> str:
@@ -47,14 +48,19 @@ def to_pdf(
     jurisdiction: str,
     question_original: str = "",   # original (may be Arabic) shown as a note
 ) -> bytes:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import cm
     from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
     from reportlab.platypus import (
-        SimpleDocTemplate, Paragraph, Spacer, HRFlowable, ListFlowable, ListItem,
+        HRFlowable,
+        ListFlowable,
+        ListItem,
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
     )
-    from reportlab.lib.enums import TA_LEFT, TA_CENTER
 
     ACCENT  = colors.HexColor("#0a66c2")
     GREY    = colors.HexColor("#7a8499")
@@ -109,17 +115,17 @@ def to_pdf(
     clean = _clean_citations(answer)
 
     for block in clean.split("\n\n"):
-        lines = [l for l in block.split("\n") if l.strip()]
+        lines = [ln for ln in block.split("\n") if ln.strip()]
         if not lines:
             continue
         bullet_pat   = re.compile(r'^[*\-–—•]\s+(.*)')
         numbered_pat = re.compile(r'^\d+[.)]\s+(.*)')
 
-        if all(bullet_pat.match(l.lstrip()) for l in lines):
-            items = [ListItem(Paragraph(bullet_pat.match(l.lstrip()).group(1), s_body)) for l in lines]
+        if all(bullet_pat.match(ln.lstrip()) for ln in lines):
+            items = [ListItem(Paragraph(bullet_pat.match(ln.lstrip()).group(1), s_body)) for ln in lines]
             story.append(ListFlowable(items, bulletType="bullet", leftIndent=15, spaceAfter=4))
-        elif all(numbered_pat.match(l.lstrip()) for l in lines):
-            items = [ListItem(Paragraph(numbered_pat.match(l.lstrip()).group(1), s_body)) for l in lines]
+        elif all(numbered_pat.match(ln.lstrip()) for ln in lines):
+            items = [ListItem(Paragraph(numbered_pat.match(ln.lstrip()).group(1), s_body)) for ln in lines]
             story.append(ListFlowable(items, bulletType="1", leftIndent=15, spaceAfter=4))
         else:
             story.append(Paragraph(" ".join(lines), s_body))
@@ -168,10 +174,10 @@ def to_docx(
     lang: str = "en",
 ) -> bytes:
     from docx import Document
-    from docx.shared import Pt, Cm, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.shared import Cm, Pt, RGBColor
 
     ACCENT_RGB = RGBColor(0x0A, 0x66, 0xC2)
     GREY_RGB   = RGBColor(0x7A, 0x84, 0x99)
@@ -244,17 +250,17 @@ def to_docx(
     numbered_pat = re.compile(r'^\d+[.)]\s+(.*)')
 
     for block in clean.split("\n\n"):
-        lines = [l for l in block.split("\n") if l.strip()]
+        lines = [ln for ln in block.split("\n") if ln.strip()]
         if not lines:
             continue
-        if all(bullet_pat.match(l.lstrip()) for l in lines):
+        if all(bullet_pat.match(ln.lstrip()) for ln in lines):
             for line in lines:
                 item = bullet_pat.match(line.lstrip()).group(1)
                 p = doc.add_paragraph(item, style="List Bullet")
                 p.alignment = align
                 if RTL:
                     _set_rtl(p)
-        elif all(numbered_pat.match(l.lstrip()) for l in lines):
+        elif all(numbered_pat.match(ln.lstrip()) for ln in lines):
             for line in lines:
                 item = numbered_pat.match(line.lstrip()).group(1)
                 p = doc.add_paragraph(item, style="List Number")

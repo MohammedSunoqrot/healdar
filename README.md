@@ -14,7 +14,22 @@ license: apache-2.0
 
 **Bilingual AI assistant for navigating health AI regulations across the Gulf region, Europe, and the United States.**
 
-Healdar uses Retrieval-Augmented Generation (RAG) to give grounded, source-cited answers to regulatory questions in both **English and Arabic** — covering SFDA, UAE DoH, Qatar MOPH, EU MDR, and US FDA.
+Healdar answers regulatory questions in **English and Arabic**, grounded in 60 official
+documents from SFDA, SDAIA, NHIC, UAE DoH & DHA, Qatar MOPH/MCIT/NCSA, the EU, the US FDA,
+and the WHO — with a citation and a page number for every claim.
+
+---
+
+## What makes it trustworthy
+
+A regulatory assistant that invents an obligation is worse than no assistant. Three
+properties matter more than fluency here:
+
+| Property | How it works |
+|---|---|
+| **It refuses** | Retrieval is gated on cosine distance. Ask it about cookie recipes and it returns nothing rather than summarising five irrelevant passages into a confident wrong answer. Measured: on-topic queries score 0.19–0.48, off-topic 0.76–0.91; the gate sits at 0.62. |
+| **Citations line up** | Source numbering is decided in exactly one place. `[Source 3]` in the text is always the third entry in the reference list — verified end-to-end by the evaluation harness. |
+| **It admits gaps** | Every answer carries a self-assessed coverage marker. When the documents only partly cover a question, the answer says so and the UI shows a caution banner. |
 
 ---
 
@@ -22,13 +37,14 @@ Healdar uses Retrieval-Augmented Generation (RAG) to give grounded, source-cited
 
 | Feature | Detail |
 |---|---|
-| **Bilingual** | English and Arabic UI; Arabic queries auto-translated for retrieval then answered in Arabic |
-| **6 jurisdictions** | 🇸🇦 SFDA · 🇦🇪 UAE DoH · 🇶🇦 Qatar MOPH · 🇪🇺 EU MDR · 🇺🇸 US FDA · 🌍 All |
-| **Comparison mode** | Side-by-side answers from two jurisdictions at once |
-| **Source citations** | Every answer shows the exact document and page number |
+| **Bilingual** | English and Arabic UI; Arabic queries are translated for retrieval, then answered in Arabic |
+| **7 jurisdictions** | 🇸🇦 Saudi Arabia · 🇦🇪 UAE · 🇶🇦 Qatar · 🇪🇺 EU · 🇺🇸 US · 🌐 International (WHO) · 🌍 All |
+| **Hybrid retrieval** | Dense embeddings **+** BM25, fused with Reciprocal Rank Fusion — so "Article 120" and "MDS-G010" are found by exact token, not just by meaning |
+| **Balanced comparison** | In "all jurisdictions" mode, no single corpus can crowd out the others (the EU alone is 53% of the chunks) |
+| **Comparison mode** | Two jurisdictions side by side, queried in parallel |
+| **Relevance shown** | Each citation displays how well it actually matched |
 | **Export** | Download answers as PDF or Word (.docx) |
-| **Chat history** | Conversation context carried across questions |
-| **Analytics** | Built-in query analytics dashboard (CSV export) |
+| **Analytics** | Usage dashboard with CSV export; question text is not stored by default |
 | **Dark / Light theme** | Switchable from the sidebar |
 
 ---
@@ -38,186 +54,192 @@ Healdar uses Retrieval-Augmented Generation (RAG) to give grounded, source-cited
 ```
 User question (EN or AR)
         │
+        ├── Arabic? ──► translate to English            gpt-oss-20b
+        │
+        ├── follow-up? ──► rewrite as standalone        gpt-oss-20b
+        │
         ▼
-┌───────────────────────────────────┐
-│  Arabic path: translate → EN      │  Llama 3.1 8B (Groq)
-│  English path: use as-is          │
-└───────────────────┬───────────────┘
-                    │
-                    ▼
-        ┌───────────────────┐
-        │  ChromaDB retrieval│  all-MiniLM-L6-v2 embeddings
-        │  top-5 chunks      │  filtered by jurisdiction
-        └─────────┬─────────┘
-                  │
-                  ▼
-        ┌───────────────────┐
-        │  Answer generation │  Llama 3.1 8B (Groq)
-        └─────────┬─────────┘
-                  │
-        ┌─────────▼─────────┐
-        │  Arabic path only  │  Llama 3.3 70B (Groq) — high-quality translation
-        └─────────┬─────────┘
-                  │
-                  ▼
-        Cited answer + source strip
+┌────────────────────────────────────────────────┐
+│  HYBRID RETRIEVAL over 3,849 chunks            │
+│    dense    ChromaDB + all-MiniLM-L6-v2        │
+│    lexical  BM25 over the same chunks          │
+│    fuse     Reciprocal Rank Fusion             │
+│    gate     drop anything past max_distance    │──► nothing relevant?
+│    balance  cap passages per jurisdiction      │      answer "not covered"
+└───────────────────────┬────────────────────────┘
+                        ▼
+            merge same-page passages          ← fixes citation numbering
+                        ▼
+            generate cited answer             gpt-oss-120b
+                        ▼
+            Arabic? ──► translate             gpt-oss-120b
+                        ▼
+            Cited answer + references + coverage badge
 ```
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
 Healdar/
 ├── src/
 │   ├── app.py              # Streamlit frontend
-│   ├── rag_pipeline.py     # RAG logic (retrieval + generation)
+│   ├── config.py           # all tunables, every one env-overridable
+│   ├── rag_pipeline.py     # orchestration: translate → retrieve → generate
+│   ├── retrieval.py        # hybrid search, relevance gate, balancing
+│   ├── vectorstore.py      # index lifecycle, integrity checks, auto-repair
 │   ├── ingest.py           # PDF → chunks.json
-│   ├── embed.py            # chunks.json → ChromaDB vectorstore
-│   ├── export.py           # PDF / Word export helpers
-│   └── analytics.py        # SQLite query analytics
+│   ├── embed.py            # chunks.json → ChromaDB
+│   ├── export.py           # PDF / Word export
+│   └── analytics.py        # SQLite usage analytics
 │
-├── scripts/
-│   └── download_docs.py    # Helper to download regulatory PDFs
+├── eval/
+│   ├── golden.jsonl        # 54 curated cases, incl. 8 that must be refused
+│   └── run_eval.py         # retrieval + generation metrics, CI-gating
+│
+├── scripts/download_docs.py  # fetch + validate all 59 source documents
+├── docs/document-research.md # provenance, gaps, superseded versions
 │
 ├── data/
 │   ├── processed/
-│   │   ├── chunks.json         # Chunked text (committed)
-│   │   └── vectorstore/        # ChromaDB index (committed)
-│   ├── raw_docs/               # Source PDFs — NOT committed (.gitignore)
-│   └── runtime/
-│       ├── analytics.db        # Local analytics — NOT committed
-│       └── last_session.json   # Last session cache — NOT committed
+│   │   ├── chunks.json         # source of truth (committed, plain JSON)
+│   │   └── vectorstore/        # derived index (committed via Git LFS)
+│   ├── raw_docs/               # source PDFs — NOT committed
+│   └── runtime/                # analytics DB — NOT committed
 │
-├── tests/                  # pytest test suite
-├── .streamlit/
-│   ├── config.toml         # Theme + server settings
-│   └── secrets.toml.example
-│
-├── .env.example            # Copy to .env and fill in your key
-├── Dockerfile              # Multi-stage Docker build
-├── requirements.txt
-├── run.bat                 # Windows launcher
-├── run.sh                  # Linux/macOS launcher
-├── deploy.sh               # Push to GitHub + HuggingFace
-└── LICENSE                 # Apache 2.0
+├── tests/                  # 163 tests
+└── .github/workflows/ci.yml
 ```
 
 ---
 
-## Quick Start (Local)
-
-### 1. Clone and create the environment
+## Quick start
 
 ```bash
 git clone https://github.com/MohammedSunoqrot/healdar.git
 cd healdar
+git lfs pull                      # IMPORTANT — see note below
+
 python -m venv .venv
-
-# Windows
-.venv\Scripts\activate
-
-# Linux / macOS
-source .venv/bin/activate
+.venv\Scripts\activate            # Windows
+source .venv/bin/activate         # Linux / macOS
 
 pip install -r requirements.txt
+cp .env.example .env              # then add your Groq key
 ```
 
-### 2. Set your Groq API key
+Then:
 
 ```bash
-# Copy the example and fill in your key
-cp .env.example .env
+.\run.bat        # Windows
+./run.sh         # Linux / macOS
 ```
 
-Edit `.env`:
+Open <http://localhost:8501>.
 
-```
-GROQ_API_KEY=gsk_your_key_here
-```
+> **Why `git lfs pull` matters.** The vector store is LFS-tracked. Without it you get
+> ~130-byte pointer stubs, and Chroma opens fine, reports the right document count, and
+> then throws on the first query. Healdar now detects this and rebuilds the index from
+> `chunks.json` automatically — but pulling properly is faster than re-embedding 3,849
+> chunks.
 
-Get a free key at [console.groq.com](https://console.groq.com).
-
-### 3. Run
-
-The vectorstore is already built and committed. Just launch the app:
+### Rebuilding the corpus
 
 ```bash
-# Windows
-.\run.bat
-
-# Linux / macOS
-./run.sh
+python scripts/download_docs.py       # fetch + validate source PDFs
+python src/ingest.py                  # PDFs  → chunks.json
+python src/embed.py --rebuild         # chunks → vector store
 ```
 
-Then open [http://localhost:8501](http://localhost:8501).
+### Running the checks
 
-> **To rebuild the vectorstore** (e.g. after adding new regulatory PDFs):
-> ```bash
-> python src/ingest.py   # PDF → data/processed/chunks.json
-> python src/embed.py    # chunks.json → data/processed/vectorstore/
-> ```
-
----
-
-## Deploying on HuggingFace Spaces
-
-1. Fork or push this repo to your HF Space (see `deploy.sh`)
-2. In the Space settings → **Variables and secrets**, add:
-
-   | Name | Value |
-   |---|---|
-   | `GROQ_API_KEY` | `gsk_your_key_here` |
-
-3. HF Spaces auto-deploys on every push to `main`.
+```bash
+pytest tests -q                       # 163 unit tests
+python eval/run_eval.py               # retrieval metrics (no API key needed)
+python eval/run_eval.py --full        # also generates answers (uses Groq)
+ruff check src tests eval scripts
+```
 
 ---
 
-## Deploying on Streamlit Cloud
+## Configuration
 
-1. Push to GitHub
-2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app**
-3. Select your repo, set **Main file path** to `src/app.py`
-4. Under **Advanced settings → Secrets**, paste:
+Everything is environment-overridable — see `.env.example` for the full list.
 
-   ```toml
-   GROQ_API_KEY = "gsk_your_key_here"
-   ```
-
----
-
-## Environment Variables
-
-| Variable | Required | Description |
+| Variable | Default | Purpose |
 |---|---|---|
-| `GROQ_API_KEY` | ✅ Yes | Groq API key — [console.groq.com](https://console.groq.com) |
-| `HF_HUB_OFFLINE` | No | Set to `1` to skip HuggingFace Hub network checks (set automatically by `run.bat` / `run.sh`) |
+| `GROQ_API_KEY` | — | **Required.** [console.groq.com](https://console.groq.com) |
+| `GROQ_MODEL_ANSWER` | `openai/gpt-oss-120b` | Writes the answer |
+| `GROQ_MODEL_LARGE` | `openai/gpt-oss-120b` | Arabic translation |
+| `GROQ_MODEL` | `openai/gpt-oss-20b` | Query translation, follow-up rewriting |
+| `HEALDAR_MAX_DISTANCE` | `0.62` | Relevance gate — lower refuses more |
+| `HEALDAR_TOP_K` | `5` | Passages given to the model |
+| `HEALDAR_HYBRID` | `1` | BM25 alongside dense search |
+| `HEALDAR_MAX_PER_JX` | `2` | Per-jurisdiction cap in "all" mode |
+| `HEALDAR_PERSIST_SESSION` | `0` | Chat history to disk — **leave off when shared** |
+| `HEALDAR_ANALYTICS_QUESTIONS` | `0` | Store raw question text |
+| `HEALDAR_RATE_LIMIT_QUERIES` | `0` | Per-session throttle (0 = off) |
+
+> **Models get retired.** Groq decommissioned `llama-3.1-8b-instant` and
+> `llama-3.3-70b-versatile` on 2026-08-16, which broke every query at once. Healdar now
+> checks its configured model at startup and says so plainly. Keep an eye on
+> [the deprecation schedule](https://console.groq.com/docs/deprecations); switching is a
+> config change, not a code change.
 
 ---
 
-## Tech Stack
+## Deployment
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for Docker, Streamlit Cloud, and HuggingFace Spaces.
+
+`./deploy.sh` runs the tests and the evaluation, then pushes to GitHub. Publishing to the
+**public** HuggingFace Space is opt-in via `./deploy.sh --hf`.
+
+---
+
+## Coverage
+
+60 documents, 3,849 chunks.
+
+| Jurisdiction | Bodies | Documents |
+|---|---|---|
+| 🇸🇦 Saudi Arabia | SFDA, SDAIA, NHIC | 18 |
+| 🇪🇺 European Union | MDR, IVDR, AI Act, MDCG, GPAI Code | 14 |
+| 🇺🇸 United States | FDA | 9 |
+| 🇦🇪 UAE | DoH Abu Dhabi, DHA Dubai, National | 10 |
+| 🇶🇦 Qatar | MOPH, MCIT, NCSA | 8 |
+| 🌐 International | WHO | 1 |
+
+Provenance, publication dates, superseded versions, and the documents deliberately
+*excluded* (paywalled standards, drafts, non-primary sources) are recorded in
+[docs/document-research.md](docs/document-research.md).
+
+**Known gaps**, needing manual sourcing: UAE Federal Decree-Law 45/2021 (no official
+English PDF), Qatar Law 13/2016 (the official portal serves a broken TLS chain — not
+worth disabling certificate verification to fetch the text of a law), and IMDRF N88/N81.
+
+---
+
+## Tech stack
 
 | Layer | Technology |
 |---|---|
 | Frontend | [Streamlit](https://streamlit.io) 1.58 |
-| LLM | [Groq](https://groq.com) — Llama 3.1 8B + Llama 3.3 70B |
-| Embeddings | [sentence-transformers](https://www.sbert.net/) — `all-MiniLM-L6-v2` |
+| LLM | [Groq](https://groq.com) — GPT-OSS 120B + 20B |
+| Embeddings | [sentence-transformers](https://www.sbert.net/) `all-MiniLM-L6-v2` |
+| Lexical search | [rank-bm25](https://github.com/dorianbrown/rank_bm25) |
 | Vector store | [ChromaDB](https://www.trychroma.com/) 1.5 |
-| PDF parsing | PyMuPDF + pypdf |
+| PDF parsing | PyMuPDF |
 | Export | ReportLab (PDF) + python-docx (Word) |
-| Analytics | SQLite via Python stdlib |
+| Analytics | SQLite |
 
 ---
 
-## Supported Regulatory Documents
+## Disclaimer
 
-| Jurisdiction | Body | Coverage |
-|---|---|---|
-| 🇸🇦 Saudi Arabia | SFDA + SDAIA | Medical devices, AI regulations |
-| 🇦🇪 UAE | DoH Abu Dhabi, DHA Dubai | Health AI frameworks |
-| 🇶🇦 Qatar | MOPH, MCIT, NCSA | Digital health policy |
-| 🇪🇺 European Union | EU MDR, MDCG guidance | Medical device regulation |
-| 🇺🇸 United States | FDA | AI/ML-based SaMD guidance |
+Healdar is an informational tool. It is not legal or regulatory advice. Always verify
+against the official published documents and consult the relevant regulatory body.
 
 ---
 

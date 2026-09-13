@@ -36,3 +36,10 @@ data/runtime/analytics.db
 
 # ── Raw source PDFs (large; vectorstore is the built artefact) ────────
 data/raw_docs/
+
+# ── Tooling caches ────────────────────────────────────────────────────
+.ruff_cache/
+
+# ── Evaluation output (report is regenerated, not committed) ──────────
+eval/last_report.json
+eval-report.json

@@ -1,162 +1,228 @@
 """
-Healdar RAG Pipeline
+Healdar RAG pipeline.
 
-Arabic query flow (two-model approach for maximum quality):
-  1. Translate Arabic question → English  (8B model, fast)
-  2. Retrieve top-5 English chunks from ChromaDB
-  3. Generate answer in English            (8B model, proven quality)
-  4. Translate English answer → Arabic     (70B model, excellent quality)
+English query:
+  1. retrieve (hybrid dense + BM25, relevance-gated)
+  2. generate the answer in English
 
-English query flow:
-  1. Retrieve top-5 English chunks from ChromaDB
-  2. Generate answer in English            (8B model)
+Arabic query:
+  1. translate question -> English          (small model, fast)
+  2. retrieve with the English query
+  3. generate the answer in English         (answer model)
+  4. translate the answer -> Arabic         (large model)
+
+The English answer is always kept alongside the Arabic one, so conversation
+history and PDF export can use it.
+
+Citation numbering is decided in exactly one place -- the passages list built
+here. The prompt, RAGAnswer.sources and the UI all index into that same list,
+so "[Source 3]" in the text is always the third entry in the reference list.
 """
 
-import os
-import logging
-import re
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Optional
+from __future__ import annotations
 
+import logging
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+
+import groq
 from dotenv import load_dotenv
-import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
 from groq import Groq
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-SCRIPT_DIR   = Path(__file__).resolve().parent
-PROJECT_ROOT = SCRIPT_DIR.parent
-VECTORSTORE  = PROJECT_ROOT / "data" / "processed" / "vectorstore"
-ENV_FILE     = PROJECT_ROOT / ".env"
+import config
+import vectorstore
+from retrieval import Passage, Retriever
+
+logger = logging.getLogger(__name__)
+
+# Suppress noisy third-party HTTP logs.
+for _noisy in ("httpx", "sentence_transformers", "transformers", "huggingface_hub"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
+
+# HF_HUB_OFFLINE=1 is set by run.bat / run.sh for local runs where the model is
+# already cached. On HuggingFace Spaces the var is absent so the model can be
+# downloaded on cold start -- do NOT set a default here.
 
 # ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-COLLECTION_NAME  = "regradar"
-EMBED_MODEL      = "all-MiniLM-L6-v2"
-GROQ_MODEL       = "llama-3.1-8b-instant"       # fast model for English Q&A
-GROQ_MODEL_LARGE = "llama-3.3-70b-versatile"    # high-quality model for Arabic translation
-TOP_K            = 5
-
-# ---------------------------------------------------------------------------
-# Jurisdiction alias → actual ChromaDB values
-# The vectorstore uses folder names as jurisdiction tags.
-# These aliases let callers use short, friendly names.
+# Jurisdiction alias -> the jurisdiction values stored in the vector store
+# (which are the raw_docs/ folder names).
 # ---------------------------------------------------------------------------
 JURISDICTION_MAP: dict[str, list[str]] = {
     "eu":    ["EU_MDR_MDCG"],
-    "sfda":  ["SFDA"],
-    "ksa":   ["SFDA", "KSA_SDAIA"],
-    "qatar": ["Qatar_MCIT", "Qatar_MOPH", "Qatar_NCSA"],
+    # SFDA regulates the device, SDAIA governs the data and the AI itself, and
+    # NHIC sets the national health-information standards. A Saudi question
+    # almost always needs more than one of them.
+    "sfda":  ["SFDA", "KSA_SDAIA", "KSA_NHIC"],
+    "ksa":   ["SFDA", "KSA_SDAIA", "KSA_NHIC"],
+    "qatar": ["Qatar_MCIT", "Qatar_MOPH", "Qatar_NCSA", "Qatar_National"],
     "uae":   ["UAE_DHA_Dubai", "UAE_DoH_AbuDhabi", "UAE_National"],
     "fda":   ["USA_FDA"],
     "usa":   ["USA_FDA"],
-    "all":   [],   # empty = no filter applied
+    "intl":  ["International"],
+    "all":   [],   # empty = search everything
 }
 
+
 # ---------------------------------------------------------------------------
-# Logging — suppress noisy HuggingFace HTTP logs
+# Errors
 # ---------------------------------------------------------------------------
 
-# HF_HUB_OFFLINE=1 is set by run.bat / run.sh for local runs where the model
-# is already cached. On HuggingFace Spaces the var is absent so the model can
-# be downloaded on cold start — do NOT set a default here.
+class HealdarError(Exception):
+    """Base class for errors the UI knows how to present."""
 
-logging.basicConfig(level=logging.WARNING, format="%(levelname)s  %(message)s")
-logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("transformers").setLevel(logging.ERROR)
-logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 
-logger = logging.getLogger(__name__)
+class RateLimitError(HealdarError):
+    """Groq returned 429."""
+
+
+class ServiceUnavailableError(HealdarError):
+    """Groq is unreachable, timed out, or returned 5xx."""
+
+
+class ModelUnavailableError(HealdarError):
+    """The configured model id was rejected -- usually a decommissioned model."""
+
+
+class RetrievalError(HealdarError):
+    """The vector store failed. Distinct from 'nothing relevant was found'."""
+
+
+def _wrap_groq_error(exc: Exception) -> Exception:
+    """Map a Groq SDK exception onto a Healdar error the UI can render."""
+    if isinstance(exc, groq.RateLimitError):
+        return RateLimitError("Groq rate limit reached")
+    if isinstance(exc, (groq.APITimeoutError, groq.APIConnectionError)):
+        return ServiceUnavailableError(f"Could not reach Groq: {exc}")
+    if isinstance(exc, groq.APIStatusError):
+        status = getattr(exc, "status_code", None)
+        body = str(exc).lower()
+        if status == 404 or "decommission" in body or "does not exist" in body:
+            return ModelUnavailableError(str(exc))
+        if status and status >= 500:
+            return ServiceUnavailableError(f"Groq returned {status}")
+    return exc
 
 
 # ---------------------------------------------------------------------------
 # Return type
 # ---------------------------------------------------------------------------
+
 @dataclass
 class RAGAnswer:
-    question:    str
-    answer:      str
-    sources:     list[dict] = field(default_factory=list)
-    no_context:  bool = False
-    question_en: str = ""   # English version used for retrieval (= question for English queries)
-    answer_en:   str = ""   # English answer before Arabic translation (for history context)
+    question:      str
+    answer:        str
+    sources:       list[dict] = field(default_factory=list)
+    no_context:    bool = False
+    question_en:   str = ""
+    answer_en:     str = ""
+    # "ok" | "weak" -- material found but a poor match | "no_match"
+    quality:       str = "ok"
+    best_distance: float | None = None
+    # "full" | "partial" -- the model's own assessment of context sufficiency
+    coverage:      str = "full"
+    model:         str = ""
 
-    def print(self) -> None:
-        """Pretty-print the answer to stdout."""
+    @property
+    def is_weak(self) -> bool:
+        return self.quality == "weak" or self.coverage == "partial"
+
+    def to_stdout(self) -> None:
+        """Pretty-print to the terminal (used by the __main__ smoke test)."""
         print("\n" + "=" * 65)
         print(f"  Q: {self.question}")
         print("=" * 65)
         if self.no_context:
-            print("  [No relevant context found in the vectorstore]")
+            print("  [No relevant context found in the vector store]")
         print(f"\n{self.answer}")
         if self.sources:
             print("\n--- Sources ---")
-            seen = set()
-            for s in self.sources:
-                key = (s["filename"], s["page_number"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                print(f"  • {s['filename']}  |  {s['jurisdiction']}  |  p.{s['page_number']}")
+            for i, s in enumerate(self.sources, start=1):
+                rel = s.get("relevance")
+                rel_s = f"  rel={rel}" if rel is not None else ""
+                print(f"  [{i}] {s['filename']} | {s['jurisdiction']} | "
+                      f"p.{s['page_number']}{rel_s}")
+        print(f"\n  quality={self.quality} coverage={self.coverage} model={self.model}")
         print("=" * 65 + "\n")
 
 
 # ---------------------------------------------------------------------------
-class RateLimitError(Exception):
-    """Raised when Groq returns a 429 / rate-limit response."""
-
-
+# Pipeline
 # ---------------------------------------------------------------------------
-# Pipeline class
-# ---------------------------------------------------------------------------
+
 class HealdarRAG:
     """
-    Wraps ChromaDB retrieval + Groq generation into a single ask() call.
-    Instantiate once and reuse — both the embedding model and the Groq
-    client are loaded at __init__ time.
+    Retrieval + generation behind a single ask() call.
+
+    Construct once and reuse: the embedding model, the vector store and the
+    Groq client are all set up in __init__.
     """
 
-    def __init__(self) -> None:
-        # Load GROQ_API_KEY from .env at project root
-        load_dotenv(ENV_FILE)
+    def __init__(self, *, verify_model: bool = True) -> None:
+        load_dotenv(config.ENV_FILE)
         api_key = os.getenv("GROQ_API_KEY")
 
-        # Streamlit Cloud stores secrets in st.secrets — try it as a fallback
+        # Streamlit Cloud keeps secrets in st.secrets rather than the env.
         if not api_key:
             try:
                 import streamlit as st
+
                 api_key = st.secrets.get("GROQ_API_KEY")
             except Exception:
                 pass
 
         if not api_key:
-            raise EnvironmentError(
-                "GROQ_API_KEY not found. Set it in .env, "
-                "as an environment variable, or in .streamlit/secrets.toml."
+            raise HealdarError(
+                "GROQ_API_KEY not found. Set it in .env, as an environment "
+                "variable, or in .streamlit/secrets.toml."
             )
 
-        # Embedding function — must match what embed.py used
-        self._ef = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+        try:
+            collection = vectorstore.load_collection()
+        except vectorstore.VectorStoreError as exc:
+            raise RetrievalError(str(exc)) from exc
 
-        # ChromaDB persistent client
-        if not VECTORSTORE.exists():
-            raise FileNotFoundError(
-                f"Vectorstore not found at {VECTORSTORE}\n"
-                "Run src/embed.py first."
-            )
-        client = chromadb.PersistentClient(path=str(VECTORSTORE))
-        self._collection = client.get_collection(
-            name=COLLECTION_NAME,
-            embedding_function=self._ef,
+        self._retriever = Retriever(collection)
+        self._groq = Groq(
+            api_key=api_key,
+            timeout=config.GROQ_TIMEOUT,
+            max_retries=config.GROQ_MAX_RETRIES,
         )
+        self.answer_model = config.GROQ_MODEL_ANSWER
 
-        # Groq client
-        self._groq = Groq(api_key=api_key)
+        if verify_model:
+            self._verify_models()
+
+    # ------------------------------------------------------------------
+    # Startup check
+    # ------------------------------------------------------------------
+
+    def _verify_models(self) -> None:
+        """
+        Confirm the configured answer model still exists.
+
+        Groq decommissions models on a published schedule; when that happens
+        every query fails with the same opaque error. One tiny call at startup
+        turns that into a clear, actionable message.
+        """
+        try:
+            self._groq.chat.completions.create(
+                model=self.answer_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+        except Exception as exc:
+            wrapped = _wrap_groq_error(exc)
+            if isinstance(wrapped, ModelUnavailableError):
+                raise ModelUnavailableError(
+                    f"Groq rejected the model '{self.answer_model}'. It may have "
+                    "been decommissioned -- see "
+                    "https://console.groq.com/docs/deprecations and set the "
+                    "GROQ_MODEL_ANSWER environment variable to a current model."
+                ) from exc
+            # Rate limits / transient outages at startup are not fatal.
+            logger.warning("Model check inconclusive: %s", wrapped)
 
     # ------------------------------------------------------------------
     # Public API
@@ -166,163 +232,156 @@ class HealdarRAG:
         self,
         question: str,
         jurisdiction: str = "all",
-        history: Optional[list[dict]] = None,
+        history: list[dict] | None = None,
     ) -> RAGAnswer:
         """
-        history: optional list of recent turns, each a dict with keys
-                 'question_en' and 'answer_en' (English text only).
-                 Used to provide context for follow-up questions.
-        """
-        """
-        Run a full RAG query.
+        Run one full RAG query.
 
         Args:
-            question:     Natural-language question from the user.
-            jurisdiction: One of the keys in JURISDICTION_MAP, or 'all'.
-
-        Returns:
-            RAGAnswer dataclass with answer text and source metadata.
+            question:     the user's question, English or Arabic.
+            jurisdiction: a key of JURISDICTION_MAP.
+            history:      recent turns as [{"question_en", "answer_en"}], used
+                          to resolve follow-up questions.
         """
-        jurisdiction = jurisdiction.lower().strip()
+        jurisdiction = (jurisdiction or "all").lower().strip()
         if jurisdiction not in JURISDICTION_MAP:
-            valid = ", ".join(sorted(JURISDICTION_MAP.keys()))
+            valid = ", ".join(sorted(JURISDICTION_MAP))
             raise ValueError(
                 f"Unknown jurisdiction '{jurisdiction}'. Valid options: {valid}"
             )
 
-        # Step 1: Build ChromaDB where-filter
-        where_filter = self._build_filter(jurisdiction)
+        in_arabic = self._is_arabic(question)
+        question_en = self._translate_to_english(question) if in_arabic else question
 
-        # Step 2: Arabic detection + query translation
-        in_arabic    = self._is_arabic(question)
-        question_en  = self._translate_to_english(question) if in_arabic else question
-
-        # Step 3: For follow-up questions, reformulate into a standalone query
-        #   so ChromaDB retrieval works well even for short/pronoun-heavy questions.
         search_query = (
-            self._maybe_reformulate(question_en, history)
-            if history else question_en
+            self._maybe_reformulate(question_en, history) if history else question_en
         )
 
-        # Step 4: Retrieve top-K relevant chunks (always with an English query)
-        chunks = self._retrieve(search_query, where_filter)
+        try:
+            found = self._retriever.search(
+                search_query, JURISDICTION_MAP[jurisdiction]
+            )
+        except Exception as exc:
+            # An index failure is NOT "no information exists" -- say so, loudly.
+            logger.error("Retrieval failed: %s", exc, exc_info=True)
+            raise RetrievalError(
+                "The regulatory index could not be searched. This is a system "
+                "fault, not an absence of regulation."
+            ) from exc
 
-        if not chunks:
+        if not found:
             return RAGAnswer(
                 question=question,
-                answer="I could not find relevant information in the regulatory documents for this query.",
+                answer="No relevant material was found in the regulatory "
+                       "documents for this question.",
                 no_context=True,
                 question_en=question_en,
+                quality=found.quality,
+                best_distance=found.best_distance,
+                model=self.answer_model,
             )
 
-        # Step 5: Generate answer in English, with conversation history for context
-        prompt         = self._build_prompt(question_en, chunks, history=history)
-        english_answer = self._generate(prompt)
+        # One passage per source page: same-page chunks are merged so that the
+        # prompt, the sources list and the UI share a single numbering scheme.
+        passages = self._merge_by_page(found.passages)
 
-        # Step 6: Translate English answer → Arabic using the larger model
-        answer_text = self._translate_to_arabic(english_answer) if in_arabic else english_answer
+        prompt = self._build_prompt(question_en, passages, history=history)
+        raw_answer = self._generate(prompt)
+        english_answer, coverage = self._extract_coverage(raw_answer)
 
-        # Step 7: Collect source metadata
-        sources = [
-            {
-                "filename":     m["filename"],
-                "jurisdiction": m["jurisdiction"],
-                "page_number":  m["page_number"],
-                "text":         m.get("text", ""),
-            }
-            for m in chunks
-        ]
+        answer_text = (
+            self._translate_to_arabic(english_answer) if in_arabic else english_answer
+        )
 
         return RAGAnswer(
             question=question,
             answer=answer_text,
-            sources=sources,
+            sources=[p.to_source_dict() for p in passages],
             question_en=question_en,
             answer_en=english_answer,
+            quality=found.quality,
+            best_distance=found.best_distance,
+            coverage=coverage,
+            model=self.answer_model,
         )
 
+    def ask_many(
+        self,
+        requests: list[tuple[str, str]],
+        history: list[dict] | None = None,
+    ) -> list[RAGAnswer]:
+        """
+        Run several (question, jurisdiction) queries concurrently.
+
+        Comparison mode used to run two full pipelines back to back -- up to
+        eight serial Groq calls for an Arabic comparison. Running them in
+        parallel roughly halves the wait; the Groq client is thread-safe.
+        """
+        if not requests:
+            return []
+        if len(requests) == 1:
+            q, jx = requests[0]
+            return [self.ask(q, jurisdiction=jx, history=history)]
+
+        with ThreadPoolExecutor(max_workers=len(requests)) as pool:
+            futures = [
+                pool.submit(self.ask, q, jurisdiction=jx, history=history)
+                for q, jx in requests
+            ]
+            return [f.result() for f in futures]
+
     # ------------------------------------------------------------------
-    # Private helpers
+    # Language handling
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _needs_reformulation(question_en: str) -> bool:
-        """Heuristic: short or pronoun-heavy questions are likely follow-ups."""
-        if len(question_en.split()) <= 7:
-            return True
-        pronouns = re.compile(
-            r'\b(it|this|that|they|them|these|those|the above|mentioned|'
-            r'previous|same|more|elaborate|expand|what about|how about)\b',
-            re.IGNORECASE,
-        )
-        return bool(pronouns.search(question_en))
+    _ARABIC_RE = re.compile(r"[؀-ۿݐ-ݿ]")
+    _LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
 
-    def _maybe_reformulate(self, question_en: str, history: list[dict]) -> str:
-        """Rewrite a likely follow-up question as standalone for better retrieval."""
-        if not self._needs_reformulation(question_en):
-            return question_en
-        last = history[-1]
-        try:
-            resp = self._groq.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Previous question: {last['question_en']}\n"
-                        f"Previous answer (excerpt): {last['answer_en'][:250]}\n\n"
-                        f"Follow-up question: {question_en}\n\n"
-                        "Rewrite the follow-up as a complete standalone question in English. "
-                        "Output only the rewritten question, nothing else."
-                    ),
-                }],
-                temperature=0,
-                max_tokens=80,
-            )
-            reformulated = resp.choices[0].message.content.strip()
-            logger.info(f"Query reformulated: '{question_en}' → '{reformulated}'")
-            return reformulated
-        except Exception as exc:
-            logger.warning(f"Reformulation failed, using original: {exc}")
-            return question_en
+    @classmethod
+    def _is_arabic(cls, text: str) -> bool:
+        """
+        True when the text is substantially Arabic.
 
-    @staticmethod
-    def _is_arabic(text: str) -> bool:
-        """Return True if the text contains Arabic Unicode characters."""
-        return bool(re.search(r'[؀-ۿ]', text))
+        A ratio rather than "contains one Arabic character": a single Arabic
+        quotation mark or borrowed term in an English question should not
+        divert the whole query through the translation pipeline.
+        """
+        letters = cls._LETTER_RE.findall(text)
+        if not letters:
+            return False
+        arabic = sum(1 for ch in letters if cls._ARABIC_RE.match(ch))
+        return arabic / len(letters) >= 0.2
 
     def _translate_to_english(self, text: str) -> str:
-        """Translate an Arabic question to English (fast 8B call, minimal tokens)."""
+        """Translate an Arabic question to English. Falls back to the original."""
         try:
-            resp = self._groq.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        f"Translate the Arabic text below into English.\n"
-                        f"Output the English translation only — no explanation, no extra text.\n\n"
-                        f"Arabic text: {text}\n\n"
-                        f"English translation:"
-                    ),
-                }],
+            resp = self._chat(
+                model=config.GROQ_MODEL_SMALL,
+                content=(
+                    "Translate the Arabic text below into English.\n"
+                    "Output the English translation only -- no explanation.\n\n"
+                    f"Arabic text: {text}\n\nEnglish translation:"
+                ),
                 temperature=0,
-                max_tokens=200,
+                max_tokens=300,
             )
-            return resp.choices[0].message.content.strip()
-        except Exception as exc:
-            if "rate limit" in str(exc).lower() or "429" in str(exc):
-                raise RateLimitError("Groq rate limit reached") from exc
-            logger.warning(f"Question translation failed, falling back to original: {exc}")
+            return resp or text
+        except RateLimitError:
+            raise
+        except HealdarError as exc:
+            logger.warning("Question translation failed, using original: %s", exc)
             return text
 
     def _translate_to_arabic(self, text: str) -> str:
         """
-        Translate a well-formed English regulatory answer to Arabic using the 70B model.
+        Translate the finished English answer into Arabic with the large model.
 
-        Citation tags [Source N] are replaced with opaque placeholders before
-        translation and restored afterwards — this is more reliable than asking
-        the LLM to preserve them via instructions.
+        Citation tags are swapped for opaque placeholders first: asking a model
+        to "preserve [Source 3] exactly" is unreliable, whereas an unfamiliar
+        token like CITE3REF survives translation untouched. If any placeholder
+        fails to come back, the translation is discarded rather than shipping
+        an answer whose citations have silently vanished.
         """
-        # ── Step 1: Protect citation tags with placeholders the LLM won't touch ──
         placeholders: dict[str, str] = {}
 
         def _to_placeholder(m: re.Match) -> str:
@@ -330,177 +389,242 @@ class HealdarRAG:
             placeholders[token] = m.group(0)
             return token
 
-        guarded = re.sub(r'\[Source\s*(\d+)[^\]]*\]', _to_placeholder, text, flags=re.IGNORECASE)
+        guarded = config.CITATION_RE.sub(_to_placeholder, text)
 
-        # ── Step 2: Translate with the large model ──
         try:
-            resp = self._groq.chat.completions.create(
-                model=GROQ_MODEL_LARGE,
-                messages=[{
-                    "role": "user",
-                    "content": (
-                        "Translate the English regulatory text below into Arabic (العربية).\n\n"
-                        "Rules:\n"
-                        "- Keep tokens like CITE1REF, CITE2REF exactly as-is — do not translate them.\n"
-                        "- Keep technical names in English: ISO, IEC, FDA, MDR, IVDR, AI Act, "
-                        "SaMD, IMDRF, SFDA, DoH, MOPH, and all standard/document codes.\n"
-                        "- Preserve bullet points, numbered lists, and paragraph structure.\n"
-                        "- Output ONLY the Arabic translation, nothing else.\n\n"
-                        f"English text:\n{guarded}\n\n"
-                        "Arabic translation:"
-                    ),
-                }],
+            translated = self._chat(
+                model=config.GROQ_MODEL_LARGE,
+                content=(
+                    "Translate the English regulatory text below into Arabic.\n\n"
+                    "Rules:\n"
+                    "- Keep tokens like CITE1REF, CITE2REF exactly as-is.\n"
+                    "- Keep technical names in English: ISO, IEC, FDA, MDR, "
+                    "IVDR, AI Act, SaMD, IMDRF, SFDA, SDAIA, DoH, MOPH, and all "
+                    "standard and document codes.\n"
+                    "- Preserve bullet points, numbered lists and paragraphs.\n"
+                    "- Output ONLY the Arabic translation.\n\n"
+                    f"English text:\n{guarded}\n\nArabic translation:"
+                ),
                 temperature=0.1,
-                max_tokens=2048,
+                max_tokens=config.ANSWER_MAX_TOKENS + 600,
             )
-            translated = resp.choices[0].message.content.strip()
-        except Exception as exc:
-            logger.warning(f"Answer translation failed, returning English: {exc}")
+        except RateLimitError:
+            raise
+        except HealdarError as exc:
+            logger.warning("Answer translation failed, returning English: %s", exc)
             return text
 
-        # ── Step 3: Restore citation tags ──
+        if not translated:
+            return text
+
+        missing = [tok for tok in placeholders if tok not in translated]
+        if missing:
+            logger.warning(
+                "Translation dropped %d citation tag(s) %s -- keeping English.",
+                len(missing), missing,
+            )
+            return text
+
         for token, original in placeholders.items():
             translated = translated.replace(token, original)
-
         return translated
 
-    def _build_filter(self, jurisdiction: str) -> Optional[dict]:
+    # ------------------------------------------------------------------
+    # Follow-up questions
+    # ------------------------------------------------------------------
+
+    _DEIXIS_RE = re.compile(
+        r"\b(it|its|this|that|they|them|these|those|the above|mentioned|"
+        r"previous|previously|same|more|elaborate|expand|what about|how about|"
+        r"and (?:in|for)|compare|instead)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _needs_reformulation(cls, question_en: str) -> bool:
         """
-        Translate the user-facing alias into a ChromaDB metadata filter.
-        Returns None when jurisdiction is 'all' (no filtering).
+        Does this look like a follow-up that cannot stand on its own?
+
+        Requires an actual back-reference. Length alone is a poor signal: a
+        short question can be perfectly self-contained ("SFDA SaMD rules?"),
+        and rewriting it against unrelated history makes retrieval worse, not
+        better -- while costing an extra round trip.
         """
-        values = JURISDICTION_MAP[jurisdiction]
+        if cls._DEIXIS_RE.search(question_en):
+            return True
+        # Very short AND no concrete subject to anchor on.
+        words = question_en.split()
+        return len(words) <= 3
 
-        if not values:          # "all"
-            return None
-
-        if len(values) == 1:
-            # Simple equality filter
-            return {"jurisdiction": values[0]}
-
-        # Multiple possible values — use $in operator
-        return {"jurisdiction": {"$in": values}}
-
-    def _retrieve(
-        self,
-        question: str,
-        where_filter: Optional[dict],
-    ) -> list[dict]:
-        """
-        Query ChromaDB for the top-K chunks closest to the question embedding.
-        Returns a list of metadata dicts with an extra 'text' key.
-        """
-        query_kwargs: dict = {
-            "query_texts": [question],
-            "n_results":   TOP_K,
-            "include":     ["documents", "metadatas", "distances"],
-        }
-        if where_filter:
-            query_kwargs["where"] = where_filter
-
+    def _maybe_reformulate(self, question_en: str, history: list[dict]) -> str:
+        if not history or not self._needs_reformulation(question_en):
+            return question_en
+        last = history[-1]
         try:
-            results = self._collection.query(**query_kwargs)
-        except Exception as exc:
-            logger.error(f"ChromaDB query failed: {exc}")
-            return []
+            rewritten = self._chat(
+                model=config.GROQ_MODEL_SMALL,
+                content=(
+                    f"Previous question: {last.get('question_en', '')}\n"
+                    f"Previous answer (excerpt): {last.get('answer_en', '')[:250]}\n\n"
+                    f"Follow-up question: {question_en}\n\n"
+                    "Rewrite the follow-up as a complete standalone question in "
+                    "English. Output only the rewritten question."
+                ),
+                temperature=0,
+                max_tokens=120,
+            )
+        except HealdarError as exc:
+            logger.warning("Reformulation failed, using original: %s", exc)
+            return question_en
 
-        # Flatten the nested lists ChromaDB returns (one list per query)
-        documents = results["documents"][0]
-        metadatas = results["metadatas"][0]
+        if not rewritten:
+            return question_en
+        logger.info("Reformulated: %r -> %r", question_en, rewritten)
+        return rewritten
 
-        chunks = []
-        for doc, meta in zip(documents, metadatas):
-            entry = dict(meta)
-            entry["text"] = doc
-            chunks.append(entry)
+    # ------------------------------------------------------------------
+    # Prompting
+    # ------------------------------------------------------------------
 
-        return chunks
+    @staticmethod
+    def _merge_by_page(passages: list[Passage]) -> list[Passage]:
+        """
+        Collapse passages from the same document page into one source.
+
+        Two chunks off the same page are the same citation as far as a reader
+        is concerned, and numbering them separately makes the reference list
+        look padded. Merging here -- before the prompt is built -- is what
+        keeps "[Source N]" and the displayed reference list in lockstep.
+        """
+        merged: dict[tuple[str, int], Passage] = {}
+        for p in passages:
+            key = (p.filename, p.page_number)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = Passage(**{**p.__dict__})
+                continue
+            if p.text not in existing.text:
+                existing.text = f"{existing.text}\n\n{p.text}"
+            existing.distance = min(existing.distance, p.distance)
+            existing.fused_score = max(existing.fused_score, p.fused_score)
+        return list(merged.values())
 
     def _build_prompt(
         self,
         question: str,
-        chunks: list[dict],
-        history: Optional[list[dict]] = None,
+        passages: list[Passage],
+        history: list[dict] | None = None,
     ) -> str:
-        """
-        Build the English-language prompt sent to Groq.
-        history: last N turns as [{"question_en": ..., "answer_en": ...}].
-        """
-        context_blocks = []
-        for i, chunk in enumerate(chunks, start=1):
-            context_blocks.append(f"[Source {i}]\n{chunk['text']}")
-        context = "\n\n".join(context_blocks)
+        context = "\n\n".join(
+            f"[Source {i}] ({p.jurisdiction})\n{p.text}"
+            for i, p in enumerate(passages, start=1)
+        )
 
         history_section = ""
         if history:
             turns = []
-            for h in history[-3:]:
-                snippet = h["answer_en"][:300] + ("…" if len(h["answer_en"]) > 300 else "")
-                turns.append(f"User: {h['question_en']}\nAssistant: {snippet}")
+            for h in history[-config.HISTORY_TURNS:]:
+                answer = h.get("answer_en", "")
+                snippet = answer[:300] + ("..." if len(answer) > 300 else "")
+                turns.append(f"User: {h.get('question_en', '')}\nAssistant: {snippet}")
             history_section = (
-                "CONVERSATION HISTORY (background context only — "
-                "do NOT cite sources from previous turns):\n"
-                + "\n\n".join(turns)
-                + "\n\n"
+                "CONVERSATION HISTORY (background only -- do NOT cite sources "
+                "from previous turns):\n" + "\n\n".join(turns) + "\n\n"
             )
 
         return (
-            "You are Healdar, an expert assistant specialising in health AI regulatory "
-            "frameworks across the Gulf region, Europe, and the United States.\n\n"
+            "You are Healdar, an expert assistant on health-AI regulatory "
+            "frameworks across the Gulf region, Europe and the United States.\n\n"
             f"{history_section}"
-            "Answer the user's question using ONLY the CONTEXT passages provided below. "
-            "When citing a source, write ONLY the short tag, e.g. [Source 1] or [Source 2]. "
-            "Do NOT write filenames, paths, or any other text inside the brackets. "
-            "If the context does not contain enough information to answer fully, say so clearly "
-            "rather than guessing.\n\n"
+            "Answer the question using ONLY the CONTEXT passages below.\n\n"
+            "Rules:\n"
+            "- Cite with the short tag only, e.g. [Source 1]. Never put "
+            "filenames, paths or page numbers inside the brackets.\n"
+            "- Cite the specific source for each substantive claim.\n"
+            "- Quote the regulation's own wording for requirements, and name "
+            "the article, clause or section number when the passage gives one.\n"
+            "- If the context does not fully answer the question, say exactly "
+            "what is missing rather than filling the gap from general "
+            "knowledge.\n"
+            "- Do not state a requirement that no passage supports.\n"
+            "- Finish with a final line, on its own, reading exactly "
+            "'COVERAGE: full' if the context answered the question completely, "
+            "or 'COVERAGE: partial' if it did not.\n\n"
             f"CONTEXT:\n{context}\n\n"
             f"QUESTION: {question}\n\n"
             "ANSWER:"
         )
 
-    def _generate(self, prompt: str) -> str:
-        """Send the prompt to Groq and return the model's response text."""
-        try:
-            response = self._groq.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=1024,
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as exc:
-            err = str(exc).lower()
-            if "rate limit" in err or "429" in err or "too many" in err:
-                raise RateLimitError("Groq rate limit reached") from exc
-            logger.error(f"Groq API call failed: {exc}")
-            raise
-
-
-# ---------------------------------------------------------------------------
-# Jurisdiction tests
-# ---------------------------------------------------------------------------
-if __name__ == "__main__":
-    TEST_QUESTION = (
-        "What are the post-market surveillance requirements for AI medical devices?"
+    _COVERAGE_RE = re.compile(
+        r"^\s*[*_`>\-\s]*COVERAGE\s*[:\-]\s*(full|partial|none)\b.*$",
+        re.IGNORECASE | re.MULTILINE,
     )
 
-    # One test per jurisdiction alias, in a logical order
-    TESTS = [
-        ("all",   TEST_QUESTION),
-        ("eu",    TEST_QUESTION),
-        ("sfda",  TEST_QUESTION),
-        ("qatar", TEST_QUESTION),
-        ("uae",   TEST_QUESTION),
-        ("fda",   TEST_QUESTION),
-    ]
+    @classmethod
+    def _extract_coverage(cls, answer: str) -> tuple[str, str]:
+        """Pull the trailing COVERAGE marker off the answer. Returns (text, coverage)."""
+        coverage = "full"
+        # The marker belongs at the end, but a model occasionally echoes the
+        # instruction earlier too -- the last occurrence is the real verdict.
+        matches = list(cls._COVERAGE_RE.finditer(answer))
+        match = matches[-1] if matches else None
+        if match:
+            found = match.group(1).lower()
+            coverage = "partial" if found in {"partial", "none"} else "full"
+            answer = (answer[:match.start()] + answer[match.end():])
+        return answer.strip(), coverage
 
+    # ------------------------------------------------------------------
+    # Groq
+    # ------------------------------------------------------------------
+
+    def _chat(
+        self,
+        *,
+        model: str,
+        content: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """One chat completion, with Groq exceptions mapped to Healdar errors."""
+        try:
+            resp = self._groq.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": content}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            wrapped = _wrap_groq_error(exc)
+            if wrapped is not exc:
+                logger.warning("Groq call failed (%s): %s", model, wrapped)
+                raise wrapped from exc
+            logger.error("Groq call failed (%s): %s", model, exc)
+            raise
+        message = resp.choices[0].message.content
+        return (message or "").strip()
+
+    def _generate(self, prompt: str) -> str:
+        return self._chat(
+            model=self.answer_model,
+            content=prompt,
+            temperature=config.ANSWER_TEMPERATURE,
+            max_tokens=config.ANSWER_MAX_TOKENS,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Smoke test: one question per jurisdiction
+# ---------------------------------------------------------------------------
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
+
+    QUESTION = "What are the post-market surveillance requirements for AI medical devices?"
     rag = HealdarRAG()
 
-    total = len(TESTS)
-    for idx, (jurisdiction, question) in enumerate(TESTS, start=1):
-        print(f"\n>>> Test {idx}/{total}: jurisdiction = '{jurisdiction}'")
+    for n, jx in enumerate(["all", "eu", "sfda", "qatar", "uae", "fda"], start=1):
+        print(f"\n>>> {n}/6  jurisdiction={jx!r}")
         try:
-            result = rag.ask(question, jurisdiction=jurisdiction)
-            result.print()
+            rag.ask(QUESTION, jurisdiction=jx).to_stdout()
         except Exception as exc:
-            print(f"  [FAILED] {exc}\n")
+            print(f"  [FAILED] {type(exc).__name__}: {exc}\n")

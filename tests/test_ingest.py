@@ -5,15 +5,15 @@ Tests for ingest.py:
   - prettify_filename (via Path.stem)
 """
 
-import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
-CODE_DIR = Path(__file__).parent.parent / "code"
-sys.path.insert(0, str(CODE_DIR))
-
+import config
 import ingest
+
+# Sample PDFs are not committed (data/raw_docs/ is gitignored), so the tests
+# that need one skip when it is absent.
+SAMPLE_PDF = config.RAW_DOCS_DIR / "SFDA" / "SFDA_MDS-G025_AI_Guidance_2025.pdf"
 
 
 class TestChunkPage(unittest.TestCase):
@@ -64,10 +64,7 @@ class TestExtractTextFromPdf(unittest.TestCase):
 
     def test_real_pdf_returns_pages(self):
         # Use an actual PDF from the project to test real extraction
-        pdf_path = (
-            CODE_DIR.parent / "data" / "raw_docs" / "SFDA" /
-            "SFDA_MDS-G025_AI_Guidance_2025.pdf"
-        )
+        pdf_path = SAMPLE_PDF
         if not pdf_path.exists():
             self.skipTest("Sample PDF not available")
         result = ingest.extract_text_from_pdf(pdf_path)
@@ -89,10 +86,7 @@ class TestProcessPdf(unittest.TestCase):
         self.assertEqual(result, [])
 
     def test_chunk_record_structure(self):
-        pdf_path = (
-            CODE_DIR.parent / "data" / "raw_docs" / "SFDA" /
-            "SFDA_MDS-G025_AI_Guidance_2025.pdf"
-        )
+        pdf_path = SAMPLE_PDF
         if not pdf_path.exists():
             self.skipTest("Sample PDF not available")
         records = ingest.process_pdf(pdf_path, "SFDA")
@@ -109,10 +103,7 @@ class TestProcessPdf(unittest.TestCase):
         self.assertEqual(meta["jurisdiction"], "SFDA")
 
     def test_jurisdiction_tag_propagated(self):
-        pdf_path = (
-            CODE_DIR.parent / "data" / "raw_docs" / "SFDA" /
-            "SFDA_MDS-G025_AI_Guidance_2025.pdf"
-        )
+        pdf_path = SAMPLE_PDF
         if not pdf_path.exists():
             self.skipTest("Sample PDF not available")
         records = ingest.process_pdf(pdf_path, "SFDA")

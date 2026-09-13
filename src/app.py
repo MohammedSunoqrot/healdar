@@ -6,12 +6,15 @@ Streamlit frontend
 import dataclasses
 import html as _html
 import json
+import logging
 import re
 import sys
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as _components
+
+logger = logging.getLogger("healdar.app")
 
 # ---------------------------------------------------------------------------
 # Path setup — app.py lives in code/, so rag_pipeline is in the same directory
@@ -22,15 +25,27 @@ SCRIPT_DIR   = Path(__file__).resolve().parent   # src/
 PROJECT_ROOT = SCRIPT_DIR.parent                  # Healdar/
 sys.path.insert(0, str(SCRIPT_DIR))
 
-# Force rag_pipeline to be re-read from disk on every Streamlit hot-reload
-# so changes to _build_prompt take effect without a full server restart.
-if "rag_pipeline" in sys.modules:
+import config
+
+# Hot-reload rag_pipeline on each rerun so prompt edits land without restarting
+# the server. Development only: in production this rebuilds the RAGAnswer class
+# on every run, which breaks isinstance checks and wastes work.
+if config.DEV_MODE and "rag_pipeline" in sys.modules:
     importlib.reload(sys.modules["rag_pipeline"])
 
-from rag_pipeline import HealdarRAG, RAGAnswer, RateLimitError  # noqa: E402
-import export as _export                          # noqa: E402
-import analytics as _analytics                    # noqa: E402
 import time as _time
+
+import analytics as _analytics
+import export as _export
+from rag_pipeline import (
+    HealdarError,
+    HealdarRAG,
+    ModelUnavailableError,
+    RAGAnswer,
+    RateLimitError,
+    RetrievalError,
+    ServiceUnavailableError,
+)
 
 # ---------------------------------------------------------------------------
 # Jurisdiction metadata — keys match rag_pipeline.py JURISDICTION_MAP
@@ -42,6 +57,7 @@ JURISDICTIONS = {
     "qatar": {"flag": "🇶🇦", "en": "Qatar (MOPH)",         "ar": "قطر (وزارة الصحة العامة)",           "color": "#8D1B3D"},
     "eu":    {"flag": "🇪🇺", "en": "European Union (MDR)", "ar": "الاتحاد الأوروبي (MDR)",             "color": "#003399"},
     "fda":   {"flag": "🇺🇸", "en": "United States (FDA)",  "ar": "الولايات المتحدة الأمريكية (FDA)",   "color": "#1A1A6E"},
+    "intl":  {"flag": "🌐", "en": "International (WHO)",   "ar": "دولي (منظمة الصحة العالمية)",        "color": "#0072CE"},
 }
 
 # ---------------------------------------------------------------------------
@@ -82,6 +98,15 @@ T = {
         "analytics_dl":     "⬇ Download CSV",
         "rate_limit":       "⏳ API rate limit reached — please wait a moment and try again.",
         "starter_prompt":   "Try asking:",
+        "weak_match":       "Only loosely related material was found — verify against the source documents before relying on this.",
+        "partial_answer":   "The retrieved documents only partly cover this question. Treat the answer as incomplete.",
+        "relevance":        "match",
+        "err_title":        "Healdar is temporarily unavailable",
+        "err_model":        "The configured language model was rejected by the provider. It has most likely been retired — set GROQ_MODEL_ANSWER to a current model.",
+        "err_service":      "The language model service is unreachable right now. Please try again shortly.",
+        "err_retrieval":    "The regulatory index could not be searched. This is a system fault, not an absence of regulation.",
+        "err_generic":      "Something went wrong handling that request.",
+        "throttled":        "You have reached this session's query limit. Please wait a little before asking again.",
     },
     "ar": {
         "tagline":        "الذكاء التنظيمي للصحة الرقمية",
@@ -116,6 +141,15 @@ T = {
         "analytics_dl":     "⬇ تنزيل CSV",
         "rate_limit":       "⏳ تم الوصول إلى حد الطلبات — يرجى الانتظار لحظة ثم المحاولة مجدداً.",
         "starter_prompt":   "جرّب أن تسأل:",
+        "weak_match":       "لم يُعثر إلا على محتوى ضعيف الصلة — يُرجى التحقق من الوثائق الرسمية قبل الاعتماد على هذه الإجابة.",
+        "partial_answer":   "الوثائق المسترجَعة تغطي هذا السؤال جزئياً فقط. اعتبر الإجابة غير مكتملة.",
+        "relevance":        "تطابق",
+        "err_title":        "هيلدار غير متاح مؤقتاً",
+        "err_model":        "رفض المزوّد النموذج اللغوي المُهيأ، وعلى الأرجح تم إيقافه — يُرجى ضبط GROQ_MODEL_ANSWER على نموذج حالي.",
+        "err_service":      "خدمة النموذج اللغوي غير متاحة حالياً. يُرجى المحاولة بعد قليل.",
+        "err_retrieval":    "تعذّر البحث في فهرس الوثائق التنظيمية. هذا خلل تقني وليس غياباً للتشريع.",
+        "err_generic":      "حدث خطأ أثناء معالجة الطلب.",
+        "throttled":        "لقد بلغت حد عدد الأسئلة لهذه الجلسة. يُرجى الانتظار قليلاً.",
     },
 }
 
@@ -374,6 +408,31 @@ def inject_css(theme: str = "dark") -> None:
         /* ── Disclaimer ── */
         .disclaimer {{ color: var(--text-disc); font-size: 0.76rem; margin-top: 0.9rem; padding-top: 0.7rem; border-top: 1px solid var(--border); text-align: center; }}
 
+        /* ── Caution banner (weak match / partial coverage) ── */
+        .notice {{
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+            background: rgba(214, 158, 46, 0.10);
+            border: 1px solid rgba(214, 158, 46, 0.45);
+            border-radius: 8px;
+            padding: 0.55rem 0.8rem;
+            margin: 0 0 0.9rem;
+            font-size: 0.8rem;
+            line-height: 1.5;
+            color: var(--text-primary);
+        }}
+        .notice.rtl {{ direction: rtl; text-align: right; }}
+        .notice-icon {{ flex-shrink: 0; }}
+
+        /* ── Relevance score on a reference row ── */
+        .ref-score {{
+            font-size: 0.68rem;
+            color: var(--text-num);
+            flex-shrink: 0;
+            font-variant-numeric: tabular-nums;
+        }}
+
         /* ── No-context notice ── */
         .no-context {{ color: var(--text-secondary); font-style: italic; text-align: center; padding: 1.5rem 0; }}
 
@@ -397,7 +456,7 @@ def inject_css(theme: str = "dark") -> None:
 # Cached RAG pipeline — loads the model once, reused across reruns.
 # Bump _RAG_VERSION after changing rag_pipeline.py to force re-creation.
 # ---------------------------------------------------------------------------
-_RAG_VERSION = "6"
+_RAG_VERSION = "7"   # bump to invalidate st.cache_resource after pipeline changes
 
 @st.cache_resource(show_spinner=False)
 def load_rag(v: str = _RAG_VERSION) -> HealdarRAG:
@@ -411,13 +470,16 @@ JX_COLOR_MAP: dict[str, str] = {
     "EU_MDR_MDCG":      "eu",
     "SFDA":             "sfda",
     "KSA_SDAIA":        "sfda",
+    "KSA_NHIC":         "sfda",
     "Qatar_MCIT":       "qatar",
     "Qatar_MOPH":       "qatar",
     "Qatar_NCSA":       "qatar",
+    "Qatar_National":   "qatar",
     "UAE_DHA_Dubai":    "uae",
     "UAE_DoH_AbuDhabi": "uae",
     "UAE_National":     "uae",
     "USA_FDA":          "fda",
+    "International":    "intl",
 }
 
 def jx_color(jurisdiction: str) -> str:
@@ -477,11 +539,20 @@ def source_strip_html(indexed_sources: list[tuple[int, dict]], lang: str, card_i
             "this.querySelector('.ref-toggle').textContent=op?'▴':'▾';"
         )
 
+        # Show how well this passage actually matched, so a reader can weigh a
+        # borderline citation instead of assuming every reference is equally solid.
+        rel = s.get("relevance")
+        score_html = (
+            f'<span class="ref-score">{round(float(rel) * 100)}%</span>'
+            if isinstance(rel, (int, float)) else ""
+        )
+
         parts.append(
             f'<div class="ref-row" data-exc="{exc_id}" onclick="{toggle_js}">'
             f'  <span class="ref-num">[{idx}]</span>'
             f'  <span class="ref-dot" style="background:{color}"></span>'
             f'  <span class="ref-label">{doc_name}&nbsp;·&nbsp;{page_lbl}{s["page_number"]}</span>'
+            f'  {score_html}'
             f'  <span class="ref-toggle">▾</span>'
             f'</div>'
         )
@@ -537,8 +608,8 @@ def text_to_html(text: str, ref_tooltips: dict | None = None) -> str:
         title   = f' title="{_html.escape(tooltip)}"' if tooltip else ""
         return f'<sup class="fn-ref"{title}>[{n}]</sup>'
 
-    # Match both clean [Source 1] and old verbose [Source 1: filename | ... | p.N]
-    safe = re.sub(r'\[Source\s*(\d+)[^\]]*\]', _ref_tag, safe, flags=re.IGNORECASE)
+    # Matches clean "[Source 1]" and legacy "[Source 1: file.pdf | p.4]" alike.
+    safe = config.CITATION_RE.sub(_ref_tag, safe)
 
     # Process line-by-line so mixed blocks (intro sentence + bullets) work correctly.
     # Consecutive bullet lines → <ul>, numbered lines → <ol>, other lines → <p>.
@@ -619,7 +690,9 @@ _COPY_THEME_CSS = {
 
 def _copy_component_html(text: str, label_copy: str, label_copied: str) -> str:
     c = _COPY_THEME_CSS.get(st.session_state.get("theme", "dark"), _COPY_THEME_CSS["dark"])
-    text_js = json.dumps(text)
+    # json.dumps alone is not enough inside a <script> block: a literal
+    # "</script>" in the answer text would close the tag early.
+    text_js = json.dumps(text).replace("</", "<\\/")
     copy_js = json.dumps(label_copy)
     done_js = json.dumps(label_copied)
     return (
@@ -659,14 +732,29 @@ def _copy_component_html(text: str, label_copy: str, label_copied: str) -> str:
 #   Everything (badge, answer, sources, disclaimer) is one HTML block so
 #   there are no stray Streamlit wrappers breaking the layout.
 # ---------------------------------------------------------------------------
+def select_cited_sources(answer: str, sources: list[dict]) -> list[tuple[int, dict]]:
+    """
+    Pair each [Source N] cited in `answer` with sources[N-1].
+
+    `sources` IS the citation numbering: the pipeline merges same-page passages
+    before building the prompt, so entry N is exactly what the model saw as
+    [Source N]. Never re-order or re-number it here — the previous version
+    deduplicated and re-indexed at render time, which shifted every reference
+    and silently dropped any citation past the end of the shortened list.
+    """
+    cited = {int(n) for n in config.CITATION_RE.findall(answer)}
+    indexed = [(i, s) for i, s in enumerate(sources, start=1) if i in cited]
+    # A citation pointing past the end means something upstream went out of
+    # sync. Show every source rather than a misleadingly partial list.
+    if cited and not indexed:
+        return list(enumerate(sources, start=1))
+    return indexed
+
+
 def render_answer(result: RAGAnswer, jx_key: str, lang: str) -> None:
     rtl = 'class="rtl"' if lang == "ar" else ""
 
-    # Deduplicate sources preserving retrieval order
-    unique = list({(s["filename"], s["page_number"]): s for s in result.sources}.values())
-    # Keep only sources actually cited as [Source N] in the answer
-    cited_nums = {int(n) for n in re.findall(r'\[Source\s*(\d+)[^\]]*\]', result.answer, re.IGNORECASE)}
-    indexed_cited = [(i, s) for i, s in enumerate(unique, start=1) if i in cited_nums]
+    indexed_cited = select_cited_sources(result.answer, result.sources)
 
     # Build hover tooltips for the superscripts: [1] → "Doc Name · p.X"
     tooltips = {
@@ -674,10 +762,25 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str) -> None:
         for idx, s in indexed_cited
     }
 
+    # Caution banners: say plainly when the evidence is thin, rather than
+    # presenting a hedged answer with the same confidence as a solid one.
+    rtl_cls = " rtl" if lang == "ar" else ""
+    notices = []
+    if not result.no_context:
+        if getattr(result, "quality", "ok") == "weak":
+            notices.append(T[lang]["weak_match"])
+        if getattr(result, "coverage", "full") == "partial":
+            notices.append(T[lang]["partial_answer"])
+    notice_html = "".join(
+        f'<div class="notice{rtl_cls}"><span class="notice-icon">⚠️</span>'
+        f'<span>{_html.escape(n)}</span></div>'
+        for n in notices
+    )
+
     body_html = (
         f'<p class="no-context">{T[lang]["no_context"]}</p>'
         if result.no_context
-        else f'<div {rtl}>{text_to_html(result.answer, tooltips)}</div>'
+        else f'{notice_html}<div {rtl}>{text_to_html(result.answer, tooltips)}</div>'
     )
 
     strip      = source_strip_html(indexed_cited, lang, card_id=jx_key)
@@ -745,6 +848,72 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Error presentation — map a pipeline failure onto a readable message
+# ---------------------------------------------------------------------------
+def error_message(exc: Exception, lang: str) -> str:
+    if isinstance(exc, RateLimitError):
+        return T[lang]["rate_limit"]
+    if isinstance(exc, ModelUnavailableError):
+        return T[lang]["err_model"]
+    if isinstance(exc, ServiceUnavailableError):
+        return T[lang]["err_service"]
+    if isinstance(exc, RetrievalError):
+        return T[lang]["err_retrieval"]
+    return T[lang]["err_generic"]
+
+
+def show_error(exc: Exception, lang: str) -> None:
+    """Warn the user, and log the real cause for whoever runs the service."""
+    logger.warning("Query failed: %s: %s", type(exc).__name__, exc)
+    st.warning(error_message(exc, lang))
+
+
+def render_unavailable(exc: Exception, lang: str) -> None:
+    """Full-page failure card for when the pipeline cannot start at all."""
+    logger.error("Startup failed: %s: %s", type(exc).__name__, exc, exc_info=True)
+    rtl_s = "direction:rtl;text-align:right;" if lang == "ar" else ""
+    st.markdown(
+        f'<div class="answer-card" style="{rtl_s}">'
+        f'  <h3 style="margin-top:0;">⚠️ {_html.escape(T[lang]["err_title"])}</h3>'
+        f'  <p>{_html.escape(error_message(exc, lang))}</p>'
+        f'  <p style="font-size:0.78rem;color:var(--text-muted);">'
+        f'    {_html.escape(f"{type(exc).__name__}: {exc}")}</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def throttle_exceeded() -> bool:
+    """
+    Has this session used up its query allowance?
+
+    Pure check with no side effect. Streamlit re-runs the whole script on every
+    interaction — a theme toggle, a language switch, a history click — so a
+    check that also *recorded* a query would drain the allowance without any
+    model call ever being made. Recording is record_query()'s job, and it is
+    called only where a request is actually about to be issued.
+
+    Disabled unless HEALDAR_RATE_LIMIT_QUERIES is set.
+    """
+    if config.RATE_LIMIT_QUERIES <= 0:
+        return False
+    now = _time.time()
+    recent = [
+        t for t in st.session_state.get("query_times", [])
+        if now - t < config.RATE_LIMIT_WINDOW
+    ]
+    st.session_state.query_times = recent
+    return len(recent) >= config.RATE_LIMIT_QUERIES
+
+
+def record_query() -> None:
+    """Count one query against the session allowance."""
+    if config.RATE_LIMIT_QUERIES <= 0:
+        return
+    st.session_state.query_times = [*st.session_state.get("query_times", []), _time.time()]
+
+
+# ---------------------------------------------------------------------------
 # Clear callback — resets the input and all stored results
 # ---------------------------------------------------------------------------
 def do_clear() -> None:
@@ -784,7 +953,15 @@ def _deserialise_entry(entry: dict) -> dict:
 
 
 def save_session(chat_history: list) -> None:
-    """Write the last N history entries to disk. Silently skips on any error."""
+    """
+    Write the last N history entries to disk.
+
+    Off by default. The file is process-wide, not per-visitor, so on any shared
+    deployment enabling this would show one person's questions and answers to
+    the next person who loads the page.
+    """
+    if not config.PERSIST_SESSION:
+        return
     try:
         payload = [_serialise_entry(e) for e in chat_history[-_MAX_PERSISTED:]]
         _SESSION_FILE.write_text(
@@ -796,6 +973,8 @@ def save_session(chat_history: list) -> None:
 
 def load_session() -> list:
     """Read persisted history from disk. Returns empty list on any error."""
+    if not config.PERSIST_SESSION:
+        return []
     try:
         if not _SESSION_FILE.exists():
             return []
@@ -862,8 +1041,17 @@ def main() -> None:
     inject_css(st.session_state.theme)
 
     _analytics.init_db()
-    rag  = load_rag(_RAG_VERSION)
-    lang: str  = st.session_state.lang
+    lang: str = st.session_state.lang
+
+    # A missing API key, a retired model or a corrupt index used to surface as a
+    # raw Python traceback in the browser. Show a readable card instead.
+    try:
+        rag = load_rag(_RAG_VERSION)
+    except Exception as exc:
+        render_unavailable(exc, lang)
+        return
+
+    lang = st.session_state.lang
     theme: str = st.session_state.theme
 
     # ── Sidebar ──────────────────────────────────────────────────────────
@@ -1157,7 +1345,10 @@ def main() -> None:
     # ── Execute RAG on submit ─────────────────────────────────────────────
     q = st.session_state.q_input.strip()   # current text in the input box
 
-    if submitted and q:
+    if submitted and q and throttle_exceeded():
+        st.warning(T[lang]["throttled"])
+    elif submitted and q:
+        record_query()
         try:
             if not compare:
                 jx       = st.session_state.last_jx
@@ -1180,10 +1371,15 @@ def main() -> None:
             else:
                 jx_l = st.session_state.last_jx_l
                 jx_r = st.session_state.last_jx_r
+                hist_ctx = build_history_context(st.session_state.chat_history)
                 with st.spinner(T[lang]["loading"]):
                     _t0 = _time.perf_counter()
-                    res_l = rag.ask(q, jurisdiction=jx_l)
-                    res_r = rag.ask(q, jurisdiction=jx_r)
+                    # Run both jurisdictions concurrently — sequentially this was
+                    # two full pipelines (up to eight Groq calls in Arabic) behind
+                    # a single spinner.
+                    res_l, res_r = rag.ask_many(
+                        [(q, jx_l), (q, jx_r)], history=hist_ctx
+                    )
                     _ms = int((_time.perf_counter() - _t0) * 1000)
                 _analytics.log_query(q, lang, "compare", jx_left=jx_l, jx_right=jx_r,
                                      response_ms=_ms, no_context=res_l.no_context and res_r.no_context)
@@ -1199,15 +1395,18 @@ def main() -> None:
                 st.session_state.selected_hist_idx = None
                 save_session(st.session_state.chat_history)
 
-        except RateLimitError:
-            st.warning(T[lang]["rate_limit"])
+        except HealdarError as exc:
+            show_error(exc, lang)
 
     # ── Auto-refresh when jurisdiction changes (updates last history entry in-place) ──
-    elif q and not submitted:
+    # This re-queries the model, so it counts against the throttle too — changing
+    # the jurisdiction selector repeatedly is otherwise a free way to spend quota.
+    elif q and not submitted and not throttle_exceeded():
       try:
         if not compare and st.session_state.last_result is not None:
             jx = st.session_state.last_jx
             if jx != st.session_state.used_jx:
+                record_query()
                 hist_ctx = build_history_context(st.session_state.chat_history[:-1])
                 with st.spinner(T[lang]["loading"]):
                     _t0 = _time.perf_counter()
@@ -1229,26 +1428,35 @@ def main() -> None:
             changed_r = (st.session_state.last_result_r is not None and
                          jx_r != st.session_state.used_jx_r)
             if changed_l or changed_r:
+                record_query()
+                pending = []
+                if changed_l:
+                    pending.append((q, jx_l))
+                if changed_r:
+                    pending.append((q, jx_r))
                 with st.spinner(T[lang]["loading"]):
                     _t0 = _time.perf_counter()
-                    if changed_l:
-                        res_l = rag.ask(q, jurisdiction=jx_l)
-                        st.session_state.last_result_l = res_l
-                        st.session_state.used_jx_l     = jx_l
-                    if changed_r:
-                        res_r = rag.ask(q, jurisdiction=jx_r)
-                        st.session_state.last_result_r = res_r
-                        st.session_state.used_jx_r     = jx_r
+                    answers = rag.ask_many(pending)
                     _ms = int((_time.perf_counter() - _t0) * 1000)
+                if changed_l:
+                    res_l = answers.pop(0)
+                    st.session_state.last_result_l = res_l
+                    st.session_state.used_jx_l     = jx_l
+                if changed_r:
+                    res_r = answers.pop(0)
+                    st.session_state.last_result_r = res_r
+                    st.session_state.used_jx_r     = jx_r
                 _analytics.log_query(q, lang, "compare", jx_left=jx_l, jx_right=jx_r, response_ms=_ms)
                 if st.session_state.chat_history:
                     last = st.session_state.chat_history[-1]
                     if changed_l:
-                        last["result_l"] = res_l; last["jx_l"] = jx_l
+                        last["result_l"] = res_l
+                        last["jx_l"] = jx_l
                     if changed_r:
-                        last["result_r"] = res_r; last["jx_r"] = jx_r
-      except RateLimitError:
-          st.warning(T[lang]["rate_limit"])
+                        last["result_r"] = res_r
+                        last["jx_r"] = jx_r
+      except HealdarError as exc:
+          show_error(exc, lang)
 
     # ── Empty state — starter questions ──────────────────────────────────
     hist = st.session_state.chat_history

@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "v*"]
+  pull_request:
+    branches: [main]
+  # Regulatory sources change and models get retired on a schedule, so check
+  # weekly even when nobody has pushed.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install ruff==0.15.1
+      - run: ruff check src tests eval scripts
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The vector store is LFS-tracked. Without this the checkout yields
+          # pointer stubs, which is exactly the failure mode that shipped to
+          # production once already.
+          lfs: true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu \
+            -r requirements.txt -r requirements-dev.txt
+
+      - name: Check no Git LFS pointers were left unresolved
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          import config, vectorstore
+          stubs = vectorstore.find_lfs_pointers(config.DATA_DIR)
+          if stubs:
+              print("Unresolved Git LFS pointer files:")
+              for p in stubs:
+                  print(f"  {p}")
+              sys.exit(1)
+          print("No LFS pointer stubs.")
+          PY
+
+      - name: Unit tests
+        run: pytest tests -q --cov=src --cov-report=term-missing
+
+      - name: Retrieval evaluation
+        # No API key needed: this measures retrieval, refusal and balancing only.
+        run: python eval/run_eval.py --json eval-report.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: eval-report
+          path: eval-report.json
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: healdar:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

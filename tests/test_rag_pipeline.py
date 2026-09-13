@@ -1,153 +1,362 @@
 """
-Tests for rag_pipeline.py:
-  - JURISDICTION_MAP data integrity
-  - HealdarRAG._build_filter  (pure logic, no DB/model needed)
-  - HealdarRAG._build_prompt  (pure logic, no DB/model needed)
-  - RAGAnswer dataclass
+Tests for rag_pipeline.py.
+
+Everything here is pure logic — no vector store, no embedding model, no network.
+HealdarRAG instances are built with object.__new__ so __init__ never runs.
 """
 
-import sys
 import unittest
-from pathlib import Path
 
-CODE_DIR = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(CODE_DIR))
+import groq
 
-from rag_pipeline import JURISDICTION_MAP, RAGAnswer, HealdarRAG
+import config
+import rag_pipeline as rp
+from rag_pipeline import (
+    JURISDICTION_MAP,
+    HealdarRAG,
+    ModelUnavailableError,
+    RAGAnswer,
+    RateLimitError,
+    ServiceUnavailableError,
+)
+from retrieval import Passage
 
 
 def _bare_rag() -> HealdarRAG:
-    """Create a HealdarRAG instance without calling __init__ (no DB or model)."""
+    """A HealdarRAG with no __init__ — safe for testing pure helpers."""
     return object.__new__(HealdarRAG)
+
+
+def _passage(text="body", fname="Doc.pdf", jx="SFDA", page=1, distance=0.3):
+    return Passage(
+        chunk_id=f"{fname}::p{page}::c0",
+        text=text, filename=fname, jurisdiction=jx,
+        page_number=page, distance=distance,
+    )
 
 
 class TestJurisdictionMap(unittest.TestCase):
 
-    def test_all_key_exists(self):
+    def test_all_key_exists_and_is_unfiltered(self):
         self.assertIn("all", JURISDICTION_MAP)
-
-    def test_all_is_empty_list(self):
         self.assertEqual(JURISDICTION_MAP["all"], [])
 
     def test_required_aliases_present(self):
-        for alias in ("eu", "sfda", "qatar", "uae", "fda"):
-            self.assertIn(alias, JURISDICTION_MAP, f"Missing alias: {alias}")
+        for alias in ("eu", "sfda", "ksa", "qatar", "uae", "fda", "usa"):
+            self.assertIn(alias, JURISDICTION_MAP, f"missing alias: {alias}")
 
     def test_non_all_aliases_have_values(self):
         for key, values in JURISDICTION_MAP.items():
             if key != "all":
-                self.assertTrue(len(values) > 0, f"'{key}' maps to empty list")
+                self.assertTrue(values, f"'{key}' maps to an empty list")
 
-    def test_uae_maps_to_three_bodies(self):
-        self.assertEqual(len(JURISDICTION_MAP["uae"]), 3)
+    def test_saudi_alias_covers_every_saudi_regulator(self):
+        # SFDA regulates the device, SDAIA governs the data and the AI itself,
+        # and NHIC sets health-information standards. The UI offers one "Saudi
+        # Arabia" option, so it has to search all three -- it previously
+        # searched only SFDA while the README advertised SDAIA coverage.
+        self.assertEqual(
+            set(JURISDICTION_MAP["sfda"]), {"SFDA", "KSA_SDAIA", "KSA_NHIC"}
+        )
 
-    def test_qatar_maps_to_three_bodies(self):
-        self.assertEqual(len(JURISDICTION_MAP["qatar"]), 3)
+    def test_every_mapped_value_exists_in_the_corpus(self):
+        """Guards against advertising a jurisdiction with no documents."""
+        import json
+
+        import config
+
+        chunks = json.loads(config.CHUNKS_FILE.read_text(encoding="utf-8"))
+        present = {c["metadata"]["jurisdiction"] for c in chunks}
+        mapped = {v for values in JURISDICTION_MAP.values() for v in values}
+        # Qatar_National is reserved for Law 13/2016, which needs manual
+        # sourcing (almeezan.qa has a broken TLS chain) -- see download_docs.py.
+        missing = mapped - present - {"Qatar_National"}
+        self.assertEqual(missing, set(), f"mapped but not ingested: {missing}")
+
+    def test_every_corpus_jurisdiction_is_reachable(self):
+        """A folder nobody can select is a document nobody can find."""
+        import json
+
+        import config
+
+        chunks = json.loads(config.CHUNKS_FILE.read_text(encoding="utf-8"))
+        present = {c["metadata"]["jurisdiction"] for c in chunks}
+        mapped = {v for values in JURISDICTION_MAP.values() for v in values}
+        self.assertEqual(present - mapped, set(),
+                         f"ingested but unreachable: {present - mapped}")
+
+    def test_ksa_and_sfda_are_equivalent(self):
+        self.assertEqual(JURISDICTION_MAP["ksa"], JURISDICTION_MAP["sfda"])
+
+    def test_multi_body_jurisdictions_cover_all_their_regulators(self):
+        # Asserting an exact count here just breaks every time a regulator is
+        # added; what matters is that each named body is actually present.
+        self.assertLessEqual(
+            {"UAE_DHA_Dubai", "UAE_DoH_AbuDhabi", "UAE_National"},
+            set(JURISDICTION_MAP["uae"]),
+        )
+        self.assertLessEqual(
+            {"Qatar_MCIT", "Qatar_MOPH", "Qatar_NCSA"},
+            set(JURISDICTION_MAP["qatar"]),
+        )
 
 
-class TestBuildFilter(unittest.TestCase):
+class TestArabicDetection(unittest.TestCase):
+    """A ratio, not a single character — see _is_arabic."""
 
-    def setUp(self):
-        self.rag = _bare_rag()
+    def test_plain_english_is_not_arabic(self):
+        self.assertFalse(HealdarRAG._is_arabic("What are the MDR requirements?"))
 
-    def test_all_returns_none(self):
-        self.assertIsNone(self.rag._build_filter("all"))
+    def test_arabic_question_is_arabic(self):
+        self.assertTrue(HealdarRAG._is_arabic("ما هي متطلبات الجهاز الطبي؟"))
 
-    def test_eu_single_value(self):
-        f = self.rag._build_filter("eu")
-        self.assertEqual(f, {"jurisdiction": "EU_MDR_MDCG"})
+    def test_one_arabic_word_in_english_does_not_flip_it(self):
+        # The old "contains any Arabic character" check sent this whole query
+        # through the translate-out-and-back pipeline.
+        self.assertFalse(
+            HealdarRAG._is_arabic("What does the term تقنية mean in the SFDA guidance?")
+        )
 
-    def test_sfda_single_value(self):
-        f = self.rag._build_filter("sfda")
-        self.assertEqual(f, {"jurisdiction": "SFDA"})
+    def test_mostly_arabic_with_english_terms_is_arabic(self):
+        self.assertTrue(
+            HealdarRAG._is_arabic("ما هي متطلبات SaMD في لائحة MDR الأوروبية؟")
+        )
 
-    def test_fda_single_value(self):
-        f = self.rag._build_filter("fda")
-        self.assertEqual(f, {"jurisdiction": "USA_FDA"})
+    def test_digits_and_punctuation_only_is_not_arabic(self):
+        self.assertFalse(HealdarRAG._is_arabic("2017/745 -- 120?"))
 
-    def test_qatar_uses_dollar_in(self):
-        f = self.rag._build_filter("qatar")
-        self.assertIn("$in", f["jurisdiction"])
-        self.assertIn("Qatar_MOPH", f["jurisdiction"]["$in"])
-        self.assertIn("Qatar_MCIT", f["jurisdiction"]["$in"])
-        self.assertIn("Qatar_NCSA", f["jurisdiction"]["$in"])
+    def test_empty_string_is_not_arabic(self):
+        self.assertFalse(HealdarRAG._is_arabic(""))
 
-    def test_uae_uses_dollar_in(self):
-        f = self.rag._build_filter("uae")
-        self.assertIn("$in", f["jurisdiction"])
-        self.assertIn("UAE_DoH_AbuDhabi", f["jurisdiction"]["$in"])
 
-    def test_invalid_jurisdiction_raises(self):
-        with self.assertRaises((KeyError, ValueError)):
-            self.rag._build_filter("invalid_jx")
+class TestCoverageExtraction(unittest.TestCase):
+
+    def test_full_marker_stripped(self):
+        text, coverage = HealdarRAG._extract_coverage("The answer.\n\nCOVERAGE: full")
+        self.assertEqual(coverage, "full")
+        self.assertNotIn("COVERAGE", text)
+        self.assertEqual(text, "The answer.")
+
+    def test_partial_marker_detected(self):
+        text, coverage = HealdarRAG._extract_coverage("Partial answer.\nCOVERAGE: partial")
+        self.assertEqual(coverage, "partial")
+        self.assertNotIn("COVERAGE", text)
+
+    def test_none_counts_as_partial(self):
+        _, coverage = HealdarRAG._extract_coverage("x\nCOVERAGE: none")
+        self.assertEqual(coverage, "partial")
+
+    def test_markdown_decorated_marker_still_matched(self):
+        _, coverage = HealdarRAG._extract_coverage("x\n**COVERAGE: partial**")
+        self.assertEqual(coverage, "partial")
+
+    def test_missing_marker_defaults_to_full(self):
+        text, coverage = HealdarRAG._extract_coverage("Just an answer.")
+        self.assertEqual(coverage, "full")
+        self.assertEqual(text, "Just an answer.")
+
+    def test_case_insensitive(self):
+        _, coverage = HealdarRAG._extract_coverage("x\ncoverage: partial")
+        self.assertEqual(coverage, "partial")
+
+    def test_body_text_is_preserved(self):
+        body = "Line one.\n\n- bullet [Source 1]\n\nLine two."
+        text, _ = HealdarRAG._extract_coverage(f"{body}\n\nCOVERAGE: full")
+        self.assertEqual(text, body)
+
+
+class TestMergeByPage(unittest.TestCase):
+    """Same-page chunks become one source, so citation numbers stay aligned."""
+
+    def test_same_page_chunks_merge(self):
+        merged = HealdarRAG._merge_by_page([
+            _passage(text="first half", page=4),
+            _passage(text="second half", page=4),
+        ])
+        self.assertEqual(len(merged), 1)
+        self.assertIn("first half", merged[0].text)
+        self.assertIn("second half", merged[0].text)
+
+    def test_different_pages_stay_separate(self):
+        merged = HealdarRAG._merge_by_page([_passage(page=4), _passage(page=5)])
+        self.assertEqual(len(merged), 2)
+
+    def test_same_page_different_files_stay_separate(self):
+        merged = HealdarRAG._merge_by_page([
+            _passage(fname="A.pdf", page=1),
+            _passage(fname="B.pdf", page=1),
+        ])
+        self.assertEqual(len(merged), 2)
+
+    def test_merged_keeps_the_best_distance(self):
+        merged = HealdarRAG._merge_by_page([
+            _passage(text="a", page=1, distance=0.40),
+            _passage(text="b", page=1, distance=0.15),
+        ])
+        self.assertAlmostEqual(merged[0].distance, 0.15)
+
+    def test_duplicate_text_not_repeated(self):
+        merged = HealdarRAG._merge_by_page([
+            _passage(text="same", page=1), _passage(text="same", page=1),
+        ])
+        self.assertEqual(merged[0].text, "same")
+
+    def test_order_is_preserved(self):
+        merged = HealdarRAG._merge_by_page([
+            _passage(fname="A.pdf"), _passage(fname="B.pdf"), _passage(fname="C.pdf"),
+        ])
+        self.assertEqual([p.filename for p in merged], ["A.pdf", "B.pdf", "C.pdf"])
+
+    def test_inputs_are_not_mutated(self):
+        original = _passage(text="one", page=1)
+        HealdarRAG._merge_by_page([original, _passage(text="two", page=1)])
+        self.assertEqual(original.text, "one")
 
 
 class TestBuildPrompt(unittest.TestCase):
 
-    CHUNKS = [
-        {"text": "Chunk alpha about AI regulation.", "filename": "DocA.pdf", "jurisdiction": "SFDA", "page_number": 1},
-        {"text": "Chunk beta about post-market.",    "filename": "DocB.pdf", "jurisdiction": "EU_MDR_MDCG", "page_number": 5},
+    PASSAGES = [
+        _passage(text="Chunk alpha about AI regulation.", fname="DocA.pdf", jx="SFDA"),
+        _passage(text="Chunk beta about post-market.", fname="DocB.pdf",
+                 jx="EU_MDR_MDCG", page=5),
     ]
     QUESTION = "What are the requirements?"
 
     def setUp(self):
         self.rag = _bare_rag()
+        self.prompt = self.rag._build_prompt(self.QUESTION, self.PASSAGES)
 
-    def test_contains_source_tags(self):
-        prompt = self.rag._build_prompt(self.QUESTION, self.CHUNKS)
-        self.assertIn("[Source 1]", prompt)
-        self.assertIn("[Source 2]", prompt)
+    def test_contains_numbered_source_tags(self):
+        self.assertIn("[Source 1]", self.prompt)
+        self.assertIn("[Source 2]", self.prompt)
 
     def test_no_filename_in_source_labels(self):
-        prompt = self.rag._build_prompt(self.QUESTION, self.CHUNKS)
-        # The label line should NOT contain raw filenames
-        label_lines = [l for l in prompt.splitlines() if l.startswith("[Source")]
-        for line in label_lines:
-            self.assertNotIn(".pdf", line, "Filename leaked into source label")
-            self.assertNotIn("|", line, "Pipe-separated metadata leaked into source label")
+        for line in self.prompt.splitlines():
+            if line.startswith("[Source"):
+                self.assertNotIn(".pdf", line)
+                self.assertNotIn("|", line)
 
     def test_chunk_texts_present(self):
-        prompt = self.rag._build_prompt(self.QUESTION, self.CHUNKS)
-        self.assertIn("Chunk alpha about AI regulation.", prompt)
-        self.assertIn("Chunk beta about post-market.", prompt)
+        self.assertIn("Chunk alpha about AI regulation.", self.prompt)
+        self.assertIn("Chunk beta about post-market.", self.prompt)
 
     def test_question_present(self):
-        prompt = self.rag._build_prompt(self.QUESTION, self.CHUNKS)
-        self.assertIn(self.QUESTION, prompt)
+        self.assertIn(self.QUESTION, self.prompt)
 
-    def test_prompt_ends_with_answer_marker(self):
-        prompt = self.rag._build_prompt(self.QUESTION, self.CHUNKS)
-        self.assertTrue(prompt.strip().endswith("ANSWER:"))
+    def test_ends_with_answer_marker(self):
+        self.assertTrue(self.prompt.strip().endswith("ANSWER:"))
 
-    def test_source_count_matches_chunks(self):
-        import re
-        prompt = self.rag._build_prompt(self.QUESTION, self.CHUNKS)
-        # Count only inside the CONTEXT section, not the system instructions
-        # (which also say "e.g. [Source 1] or [Source 2]" as examples)
-        context_section = prompt.split("CONTEXT:")[1].split("QUESTION:")[0]
-        tags = re.findall(r'\[Source \d+\]', context_section)
-        self.assertEqual(len(tags), len(self.CHUNKS))
+    def test_source_count_matches_passages(self):
+        context = self.prompt.split("CONTEXT:")[1].split("QUESTION:")[0]
+        tags = config.CITATION_RE.findall(context)
+        self.assertEqual(len(tags), len(self.PASSAGES))
+
+    def test_requests_a_coverage_marker(self):
+        self.assertIn("COVERAGE", self.prompt)
+
+    def test_history_included_when_given(self):
+        prompt = self.rag._build_prompt(
+            self.QUESTION, self.PASSAGES,
+            history=[{"question_en": "earlier q", "answer_en": "earlier a"}],
+        )
+        self.assertIn("earlier q", prompt)
+        self.assertIn("CONVERSATION HISTORY", prompt)
+
+    def test_history_absent_when_not_given(self):
+        self.assertNotIn("CONVERSATION HISTORY", self.prompt)
+
+
+class TestReformulationHeuristic(unittest.TestCase):
+
+    def test_pronoun_triggers_reformulation(self):
+        self.assertTrue(HealdarRAG._needs_reformulation("What about it?"))
+
+    def test_what_about_triggers_reformulation(self):
+        self.assertTrue(HealdarRAG._needs_reformulation("What about the UAE?"))
+
+    def test_self_contained_short_question_does_not(self):
+        # Short but complete: rewriting it against stale history makes
+        # retrieval worse and costs an extra round trip.
+        self.assertFalse(
+            HealdarRAG._needs_reformulation("SFDA post-market surveillance rules?")
+        )
+
+    def test_long_standalone_question_does_not(self):
+        self.assertFalse(HealdarRAG._needs_reformulation(
+            "What are the FDA requirements for a predetermined change control plan?"
+        ))
+
+    def test_very_short_fragment_does(self):
+        self.assertTrue(HealdarRAG._needs_reformulation("and Qatar"))
+
+
+class TestGroqErrorMapping(unittest.TestCase):
+    """Typed SDK exceptions, not string matching on the message."""
+
+    @staticmethod
+    def _response(status):
+        import httpx
+        return httpx.Response(
+            status_code=status, request=httpx.Request("POST", "https://api.groq.com")
+        )
+
+    def test_rate_limit_maps_to_rate_limit_error(self):
+        exc = groq.RateLimitError("slow down", response=self._response(429), body=None)
+        self.assertIsInstance(rp._wrap_groq_error(exc), RateLimitError)
+
+    def test_connection_error_maps_to_service_unavailable(self):
+        import httpx
+        exc = groq.APIConnectionError(
+            request=httpx.Request("POST", "https://api.groq.com")
+        )
+        self.assertIsInstance(rp._wrap_groq_error(exc), ServiceUnavailableError)
+
+    def test_404_maps_to_model_unavailable(self):
+        exc = groq.NotFoundError(
+            "model does not exist", response=self._response(404), body=None
+        )
+        self.assertIsInstance(rp._wrap_groq_error(exc), ModelUnavailableError)
+
+    def test_500_maps_to_service_unavailable(self):
+        exc = groq.InternalServerError(
+            "boom", response=self._response(500), body=None
+        )
+        self.assertIsInstance(rp._wrap_groq_error(exc), ServiceUnavailableError)
+
+    def test_unknown_error_passes_through(self):
+        exc = ValueError("something else")
+        self.assertIs(rp._wrap_groq_error(exc), exc)
 
 
 class TestRAGAnswer(unittest.TestCase):
 
-    def test_default_no_context_false(self):
+    def test_defaults(self):
         ans = RAGAnswer(question="q", answer="a")
         self.assertFalse(ans.no_context)
-
-    def test_default_sources_empty_list(self):
-        ans = RAGAnswer(question="q", answer="a")
         self.assertEqual(ans.sources, [])
-
-    def test_no_context_flag(self):
-        ans = RAGAnswer(question="q", answer="a", no_context=True)
-        self.assertTrue(ans.no_context)
+        self.assertEqual(ans.quality, "ok")
+        self.assertEqual(ans.coverage, "full")
 
     def test_sources_stored(self):
         src = [{"filename": "f.pdf", "jurisdiction": "SFDA", "page_number": 1}]
         ans = RAGAnswer(question="q", answer="a", sources=src)
-        self.assertEqual(len(ans.sources), 1)
         self.assertEqual(ans.sources[0]["filename"], "f.pdf")
+
+    def test_is_weak_on_weak_quality(self):
+        self.assertTrue(RAGAnswer(question="q", answer="a", quality="weak").is_weak)
+
+    def test_is_weak_on_partial_coverage(self):
+        self.assertTrue(RAGAnswer(question="q", answer="a", coverage="partial").is_weak)
+
+    def test_not_weak_by_default(self):
+        self.assertFalse(RAGAnswer(question="q", answer="a").is_weak)
+
+
+class TestAskValidation(unittest.TestCase):
+
+    def test_unknown_jurisdiction_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            _bare_rag().ask("q", jurisdiction="atlantis")
 
 
 if __name__ == "__main__":

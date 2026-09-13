@@ -3,19 +3,11 @@ Tests for pure-Python helper functions in app.py.
 Streamlit is mocked at the module level so no Streamlit runtime is needed.
 """
 
-import re
-import sys
 import unittest
-from pathlib import Path
-from unittest.mock import MagicMock
 
-# ── Mock streamlit BEFORE importing app so module-level st.* calls are no-ops ──
-sys.modules.setdefault("streamlit", MagicMock())
-
-CODE_DIR = Path(__file__).parent.parent / "src"
-sys.path.insert(0, str(CODE_DIR))
-
-import app  # noqa: E402  (path must be set first)
+# sys.path and the streamlit stub are set up in conftest.py.
+import app
+import config
 
 
 class TestPrettifyFilename(unittest.TestCase):
@@ -185,9 +177,9 @@ class TestTextToHtmlFootnotes(unittest.TestCase):
 
 
 class TestCitationParsing(unittest.TestCase):
-    """Test the regex used in render_answer to filter cited sources."""
+    """The one shared pattern used by the pipeline, the UI and both exporters."""
 
-    PATTERN = re.compile(r'\[Source\s*(\d+)\]', re.IGNORECASE)
+    PATTERN = config.CITATION_RE
 
     def test_single_citation(self):
         nums = {int(n) for n in self.PATTERN.findall("[Source 1] explains this.")}
@@ -210,7 +202,7 @@ class TestCitationParsing(unittest.TestCase):
         self.assertEqual(nums, {1})
 
 
-from rag_pipeline import RAGAnswer  # noqa: E402  (path already inserted above)
+from rag_pipeline import RAGAnswer
 
 
 def _make_result(q_en="q", a_en="a"):
@@ -309,3 +301,76 @@ class TestBuildHistoryContext(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSelectCitedSources(unittest.TestCase):
+    """
+    Regression cover for the citation-misalignment bug.
+
+    render_answer used to deduplicate result.sources by (filename, page) and
+    re-number from 1 at display time. The prompt had already numbered the
+    passages, so any dedupe shifted every later reference by one and dropped
+    the highest-numbered citation entirely — a reader clicking [3] got the
+    text the model had cited as [4].
+    """
+
+    SOURCES = [
+        {"filename": "A.pdf", "jurisdiction": "SFDA",        "page_number": 1, "text": "a"},
+        {"filename": "B.pdf", "jurisdiction": "EU_MDR_MDCG", "page_number": 2, "text": "b"},
+        {"filename": "C.pdf", "jurisdiction": "USA_FDA",     "page_number": 3, "text": "c"},
+        {"filename": "D.pdf", "jurisdiction": "SFDA",        "page_number": 4, "text": "d"},
+        {"filename": "E.pdf", "jurisdiction": "Qatar_MOPH",  "page_number": 5, "text": "e"},
+    ]
+
+    def test_citation_maps_to_the_same_index_the_model_saw(self):
+        picked = app.select_cited_sources("See [Source 3].", self.SOURCES)
+        self.assertEqual(len(picked), 1)
+        idx, src = picked[0]
+        self.assertEqual(idx, 3)
+        self.assertEqual(src["filename"], "C.pdf")
+
+    def test_last_source_is_not_dropped(self):
+        # The old dedupe-and-renumber path lost this one whenever any two
+        # retrieved chunks shared a page.
+        picked = app.select_cited_sources("See [Source 5].", self.SOURCES)
+        self.assertEqual([i for i, _ in picked], [5])
+        self.assertEqual(picked[0][1]["filename"], "E.pdf")
+
+    def test_same_page_entries_do_not_shift_numbering(self):
+        sources = [
+            {"filename": "A.pdf", "jurisdiction": "SFDA", "page_number": 1, "text": "a"},
+            {"filename": "A.pdf", "jurisdiction": "SFDA", "page_number": 1, "text": "a2"},
+            {"filename": "B.pdf", "jurisdiction": "SFDA", "page_number": 9, "text": "b"},
+        ]
+        picked = app.select_cited_sources("[Source 3]", sources)
+        self.assertEqual(picked[0][0], 3)
+        self.assertEqual(picked[0][1]["filename"], "B.pdf")
+
+    def test_multiple_citations_preserve_order(self):
+        picked = app.select_cited_sources("[Source 4] then [Source 2].", self.SOURCES)
+        self.assertEqual([i for i, _ in picked], [2, 4])
+
+    def test_uncited_sources_are_omitted(self):
+        picked = app.select_cited_sources("[Source 1]", self.SOURCES)
+        self.assertEqual(len(picked), 1)
+
+    def test_no_citations_returns_nothing(self):
+        self.assertEqual(app.select_cited_sources("No references.", self.SOURCES), [])
+
+    def test_repeated_citation_listed_once(self):
+        picked = app.select_cited_sources("[Source 2] and [Source 2]", self.SOURCES)
+        self.assertEqual(len(picked), 1)
+
+    def test_legacy_verbose_tag_still_parsed(self):
+        picked = app.select_cited_sources(
+            "[Source 2: B.pdf | EU | p.2]", self.SOURCES
+        )
+        self.assertEqual([i for i, _ in picked], [2])
+
+    def test_out_of_range_citation_falls_back_to_all_sources(self):
+        # Rather than silently showing nothing, surface everything.
+        picked = app.select_cited_sources("[Source 9]", self.SOURCES)
+        self.assertEqual(len(picked), len(self.SOURCES))
+
+    def test_empty_sources_is_safe(self):
+        self.assertEqual(app.select_cited_sources("[Source 1]", []), [])
