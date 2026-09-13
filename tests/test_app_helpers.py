@@ -39,10 +39,10 @@ class TestPrettifyFilename(unittest.TestCase):
 class TestJxColor(unittest.TestCase):
 
     def test_eu_color(self):
-        self.assertEqual(app.jx_color("EU_MDR_MDCG"), "#003399")
+        self.assertEqual(app.jx_color("EU_MDCG"), "#003399")
 
     def test_sfda_color(self):
-        self.assertEqual(app.jx_color("SFDA"), "#00843D")
+        self.assertEqual(app.jx_color("KSA_SFDA"), "#00843D")
 
     def test_uae_dha_color(self):
         self.assertEqual(app.jx_color("UAE_DHA_Dubai"), "#CC0001")
@@ -94,10 +94,10 @@ class TestTextToHtml(unittest.TestCase):
 class TestSourceStripHtml(unittest.TestCase):
 
     SOURCES = [
-        {"filename": "Doc_A.pdf", "jurisdiction": "SFDA",       "page_number": 1, "text": "text a"},
-        {"filename": "Doc_B.pdf", "jurisdiction": "EU_MDR_MDCG", "page_number": 2, "text": "text b"},
+        {"filename": "Doc_A.pdf", "jurisdiction": "KSA_SFDA",       "page_number": 1, "text": "text a"},
+        {"filename": "Doc_B.pdf", "jurisdiction": "EU_MDCG", "page_number": 2, "text": "text b"},
         {"filename": "Doc_C.pdf", "jurisdiction": "USA_FDA",     "page_number": 3, "text": "text c"},
-        {"filename": "Doc_D.pdf", "jurisdiction": "SFDA",        "page_number": 4, "text": "text d"},
+        {"filename": "Doc_D.pdf", "jurisdiction": "KSA_SFDA",        "page_number": 4, "text": "text d"},
     ]
 
     def test_empty_sources_returns_empty(self):
@@ -299,6 +299,22 @@ class TestBuildHistoryContext(unittest.TestCase):
         self.assertEqual([r["question_en"] for r in result], ["q2", "q3", "q4"])
 
 
+class TestNonAsciiCitationBrackets(unittest.TestCase):
+    """Answers stored before canonicalisation still render and resolve."""
+
+    SOURCES = [{"filename": "A.pdf", "jurisdiction": "KSA_SFDA", "page_number": 1, "text": "a"},
+               {"filename": "B.pdf", "jurisdiction": "KSA_SFDA", "page_number": 2, "text": "b"}]
+
+    def test_lenticular_citation_becomes_superscript(self):
+        out = app.text_to_html("Scope applies 【Source 2】.")
+        self.assertIn('<sup class="fn-ref"', out)
+        self.assertNotIn("【", out)
+
+    def test_lenticular_citation_resolves_to_source(self):
+        picked = app.select_cited_sources("x 【Source 2】", self.SOURCES)
+        self.assertEqual([i for i, _ in picked], [2])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -315,10 +331,10 @@ class TestSelectCitedSources(unittest.TestCase):
     """
 
     SOURCES = [
-        {"filename": "A.pdf", "jurisdiction": "SFDA",        "page_number": 1, "text": "a"},
-        {"filename": "B.pdf", "jurisdiction": "EU_MDR_MDCG", "page_number": 2, "text": "b"},
+        {"filename": "A.pdf", "jurisdiction": "KSA_SFDA",        "page_number": 1, "text": "a"},
+        {"filename": "B.pdf", "jurisdiction": "EU_MDCG", "page_number": 2, "text": "b"},
         {"filename": "C.pdf", "jurisdiction": "USA_FDA",     "page_number": 3, "text": "c"},
-        {"filename": "D.pdf", "jurisdiction": "SFDA",        "page_number": 4, "text": "d"},
+        {"filename": "D.pdf", "jurisdiction": "KSA_SFDA",        "page_number": 4, "text": "d"},
         {"filename": "E.pdf", "jurisdiction": "Qatar_MOPH",  "page_number": 5, "text": "e"},
     ]
 
@@ -338,9 +354,9 @@ class TestSelectCitedSources(unittest.TestCase):
 
     def test_same_page_entries_do_not_shift_numbering(self):
         sources = [
-            {"filename": "A.pdf", "jurisdiction": "SFDA", "page_number": 1, "text": "a"},
-            {"filename": "A.pdf", "jurisdiction": "SFDA", "page_number": 1, "text": "a2"},
-            {"filename": "B.pdf", "jurisdiction": "SFDA", "page_number": 9, "text": "b"},
+            {"filename": "A.pdf", "jurisdiction": "KSA_SFDA", "page_number": 1, "text": "a"},
+            {"filename": "A.pdf", "jurisdiction": "KSA_SFDA", "page_number": 1, "text": "a2"},
+            {"filename": "B.pdf", "jurisdiction": "KSA_SFDA", "page_number": 9, "text": "b"},
         ]
         picked = app.select_cited_sources("[Source 3]", sources)
         self.assertEqual(picked[0][0], 3)

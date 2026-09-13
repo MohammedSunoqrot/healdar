@@ -113,3 +113,27 @@ class TestProcessPdf(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestArabicExtractionQuality(unittest.TestCase):
+    """
+    Some Arabic PDFs extract with swapped ligature pairs under PyMuPDF
+    ("عىل" for "على", "املعالجة" for "المعالجة"). ingest scores both
+    extractors and keeps the one that reads as correct Arabic.
+    """
+
+    GOOD = "نص المادة على البيانات في هذا القانون التي تنظم المعالجة"
+    BAD = "نص املادة عىل البيانات يف هذا القانون اليت تنظم املعالجة"
+
+    def test_correct_text_scores_higher(self):
+        self.assertGreater(ingest.arabic_quality(self.GOOD), ingest.arabic_quality(self.BAD))
+
+    def test_corrupted_text_scores_negative(self):
+        self.assertLess(ingest.arabic_quality(self.BAD), 0)
+
+    def test_arabic_share(self):
+        self.assertGreater(ingest.arabic_share(self.GOOD), 0.9)
+        self.assertEqual(ingest.arabic_share("Plain English text"), 0.0)
+
+    def test_english_has_no_arabic_quality_signal(self):
+        self.assertEqual(ingest.arabic_quality("Plain English text only"), 0)

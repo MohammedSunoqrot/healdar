@@ -55,7 +55,7 @@ Then open <http://localhost:8501>.
 
 The build verifies the vector store and repairs it from `chunks.json` if needed, and warms
 the embedding model into the image — so a cold container serves its first request
-immediately instead of downloading ~90 MB of weights mid-query. Build time ~6 min, final
+immediately instead of downloading ~470 MB of weights mid-query. Build time ~6 min, final
 image ~1.5 GB.
 
 With an env file (never commit it):
@@ -149,7 +149,7 @@ Notes:
 GROQ_API_KEY = "gsk_your_key_here"
 ```
 
-First deploy downloads the embedding model (~90 MB); expect a ~3 min cold start. The free
+First deploy downloads the embedding model (~470 MB); expect a ~3 min cold start. The free
 tier gives 1 GB RAM — the model plus the vector store sit around 500 MB. The filesystem is
 ephemeral here too.
 

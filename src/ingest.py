@@ -12,6 +12,7 @@ Flow:
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ try:
     PDF_EXTRACTOR = "fitz"
 except ImportError:
     try:
-        from pypdf import PdfReader
+        from pypdf import PdfReader  # noqa: F401 -- availability check only
         PDF_EXTRACTOR = "pypdf"
     except ImportError:
         PDF_EXTRACTOR = None
@@ -84,6 +85,59 @@ logger = logging.getLogger(__name__)
 # PDF text extraction
 # ---------------------------------------------------------------------------
 
+def _extract_fitz(pdf_path: Path) -> dict[int, str]:
+    pages: dict[int, str] = {}
+    with fitz.open(str(pdf_path)) as doc:
+        for page_num, page in enumerate(doc, start=1):
+            text = page.get_text()
+            if text.strip():
+                pages[page_num] = text
+    return pages
+
+
+def _extract_pypdf(pdf_path: Path) -> dict[int, str]:
+    from pypdf import PdfReader  # local: only needed as a fallback / for Arabic
+
+    pages: dict[int, str] = {}
+    for page_num, page in enumerate(PdfReader(str(pdf_path)).pages, start=1):
+        text = page.extract_text() or ""
+        if text.strip():
+            pages[page_num] = text
+    return pages
+
+
+# ---------------------------------------------------------------------------
+# Arabic extraction quality
+#
+# Some Arabic PDFs use fonts whose ligature glyphs (lam-alef, lam-meem, fa-ya,
+# sheen-ra, ...) carry reversed ToUnicode mappings. PyMuPDF reproduces them
+# faithfully, yielding text like "عىل" for "على", "يف" for "في" and "املعالجة"
+# for "المعالجة" -- close enough to look Arabic, wrong enough that search and
+# quotation both fail. pypdf decodes the same files correctly. Rather than
+# guess per file, extract Arabic documents both ways and keep whichever reads
+# as correct Arabic.
+# ---------------------------------------------------------------------------
+_ARABIC_LETTER = re.compile(r"[ء-ي]")
+_AR_GOOD = {"على", "في", "إلى", "التي", "الذي", "هذا", "المادة", "البيانات"}
+_AR_BAD = {"عىل", "يف", "إىل", "اليت"}
+_AR_BAD_PREFIX = ("امل", "اإل", "اال")   # "الم", "الإ", "الا" with lam swapped
+
+
+def arabic_share(text: str) -> float:
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if _ARABIC_LETTER.match(c)) / len(letters)
+
+
+def arabic_quality(text: str) -> int:
+    """Correctly spelled high-frequency words minus tell-tale corrupted forms."""
+    words = re.findall(r"[ء-ي]+", text)
+    good = sum(1 for w in words if w in _AR_GOOD)
+    bad = sum(1 for w in words if w in _AR_BAD or w.startswith(_AR_BAD_PREFIX))
+    return good - bad
+
+
 def extract_text_from_pdf(pdf_path: Path) -> dict[int, str]:
     """
     Return {page_number: text} for every non-empty page in the PDF.
@@ -92,23 +146,26 @@ def extract_text_from_pdf(pdf_path: Path) -> dict[int, str]:
     page_texts: dict[int, str] = {}
 
     try:
-        if PDF_EXTRACTOR == "fitz":
-            doc = fitz.open(str(pdf_path))
-            for page_num, page in enumerate(doc, start=1):
-                text = page.get_text()
-                if text.strip():
-                    page_texts[page_num] = text
-            doc.close()
-
-        else:  # pypdf
-            reader = PdfReader(str(pdf_path))
-            for page_num, page in enumerate(reader.pages, start=1):
-                text = page.extract_text() or ""
-                if text.strip():
-                    page_texts[page_num] = text
-
+        page_texts = (
+            _extract_fitz(pdf_path) if PDF_EXTRACTOR == "fitz" else _extract_pypdf(pdf_path)
+        )
     except Exception as exc:
         logger.error(f"  Could not extract text from {pdf_path.name}: {exc}")
+
+    joined = "\n".join(page_texts.values())
+    if PDF_EXTRACTOR == "fitz" and arabic_share(joined) > 0.3:
+        try:
+            alt = _extract_pypdf(pdf_path)
+            alt_joined = "\n".join(alt.values())
+            if arabic_quality(alt_joined) > arabic_quality(joined):
+                logger.info(
+                    f"  {pdf_path.name}: Arabic text reads correctly with pypdf "
+                    f"(quality {arabic_quality(alt_joined)} vs {arabic_quality(joined)}) "
+                    "-- using it"
+                )
+                page_texts = alt
+        except Exception as exc:
+            logger.warning(f"  {pdf_path.name}: pypdf fallback failed: {exc}")
 
     if not page_texts:
         logger.warning(f"  {pdf_path.name}: no extractable text (image-only PDF?)")

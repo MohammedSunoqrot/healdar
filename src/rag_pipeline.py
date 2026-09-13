@@ -50,18 +50,26 @@ for _noisy in ("httpx", "sentence_transformers", "transformers", "huggingface_hu
 # (which are the raw_docs/ folder names).
 # ---------------------------------------------------------------------------
 JURISDICTION_MAP: dict[str, list[str]] = {
-    "eu":    ["EU_MDR_MDCG"],
+    "eu":    ["EU_Legislation", "EU_MDCG", "EU_AI_Office"],
     # SFDA regulates the device, SDAIA governs the data and the AI itself, and
     # NHIC sets the national health-information standards. A Saudi question
     # almost always needs more than one of them.
-    "sfda":  ["SFDA", "KSA_SDAIA", "KSA_NHIC"],
-    "ksa":   ["SFDA", "KSA_SDAIA", "KSA_NHIC"],
-    "qatar": ["Qatar_MCIT", "Qatar_MOPH", "Qatar_NCSA", "Qatar_National"],
-    "uae":   ["UAE_DHA_Dubai", "UAE_DoH_AbuDhabi", "UAE_National"],
+    "sfda":  ["KSA_SFDA", "KSA_SDAIA", "KSA_NHIC"],
+    "ksa":   ["KSA_SFDA", "KSA_SDAIA", "KSA_NHIC"],
+    "qatar": ["Qatar_MOPH", "Qatar_MCIT", "Qatar_NCSA", "Qatar_Legislation"],
+    "uae":   ["UAE_Federal", "UAE_DoH_AbuDhabi", "UAE_DHA_Dubai"],
     "fda":   ["USA_FDA"],
     "usa":   ["USA_FDA"],
-    "intl":  ["International"],
+    "intl":  ["INT_WHO", "INT_IMDRF"],
     "all":   [],   # empty = search everything
+}
+
+# Folder tag -> the jurisdiction a user would name. Balancing in "all" mode
+# caps passages per *jurisdiction* (all of Saudi Arabia), not per regulator
+# folder -- otherwise a country split across three folders gets three quotas.
+_CANONICAL_JURISDICTIONS = ("eu", "sfda", "uae", "qatar", "fda", "intl")
+JURISDICTION_GROUPS: dict[str, str] = {
+    tag: key for key in _CANONICAL_JURISDICTIONS for tag in JURISDICTION_MAP[key]
 }
 
 
@@ -103,6 +111,30 @@ def _wrap_groq_error(exc: Exception) -> Exception:
         if status and status >= 500:
             return ServiceUnavailableError(f"Groq returned {status}")
     return exc
+
+
+_CITE_GROUP = re.compile(
+    r"[\[【［]\s*(Sources?\s*\d[^\]】］]*)[\]】］]", re.IGNORECASE
+)
+
+
+def canonical_citations(text: str) -> str:
+    """
+    Rewrite every citation variant to the canonical "[Source N]".
+
+    Handles 【Source 2】 and ［Source 2］ brackets, grouped citations such as
+    "[Source 1, Source 3]" or "【Source 1, 4】" (each number kept), and trailing
+    detail like "[Source 2: file.pdf | p.5]" or "【Source 1†L10-L12】".
+    """
+    def repl(m: re.Match) -> str:
+        nums: list[str] = []
+        for part in re.split(r"[,;]|\band\b", m.group(1)):
+            found = re.match(r"\s*(?:Sources?\s*)?(\d+)", part, re.IGNORECASE)
+            if found:
+                nums.append(found.group(1))
+        return "".join(f"[Source {n}]" for n in dict.fromkeys(nums)) or m.group(0)
+
+    return _CITE_GROUP.sub(repl, text)
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +215,7 @@ class HealdarRAG:
         except vectorstore.VectorStoreError as exc:
             raise RetrievalError(str(exc)) from exc
 
-        self._retriever = Retriever(collection)
+        self._retriever = Retriever(collection, group_of=JURISDICTION_GROUPS)
         self._groq = Groq(
             api_key=api_key,
             timeout=config.GROQ_TIMEOUT,
@@ -287,7 +319,7 @@ class HealdarRAG:
 
         prompt = self._build_prompt(question_en, passages, history=history)
         raw_answer = self._generate(prompt)
-        english_answer, coverage = self._extract_coverage(raw_answer)
+        english_answer, coverage = self._extract_coverage(canonical_citations(raw_answer))
 
         answer_text = (
             self._translate_to_arabic(english_answer) if in_arabic else english_answer
@@ -547,6 +579,13 @@ class HealdarRAG:
             "what is missing rather than filling the gap from general "
             "knowledge.\n"
             "- Do not state a requirement that no passage supports.\n"
+            "- Some passages may be in Arabic. Read them in Arabic, and when you "
+            "rely on one, give its wording in English and mark it "
+            "(translated from Arabic).\n"
+            "- Formatting: write in plain prose with short paragraphs. Use "
+            "simple '- ' bullet lists or '1.' numbered lists where they help. "
+            "Do NOT use tables, headings, horizontal rules, or bold/italic "
+            "markup; the answer is shown as plain formatted text.\n"
             "- Finish with a final line, on its own, reading exactly "
             "'COVERAGE: full' if the context answered the question completely, "
             "or 'COVERAGE: partial' if it did not.\n\n"

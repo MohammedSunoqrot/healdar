@@ -56,7 +56,7 @@ class TestJurisdictionMap(unittest.TestCase):
         # Arabia" option, so it has to search all three -- it previously
         # searched only SFDA while the README advertised SDAIA coverage.
         self.assertEqual(
-            set(JURISDICTION_MAP["sfda"]), {"SFDA", "KSA_SDAIA", "KSA_NHIC"}
+            set(JURISDICTION_MAP["sfda"]), {"KSA_SFDA", "KSA_SDAIA", "KSA_NHIC"}
         )
 
     def test_every_mapped_value_exists_in_the_corpus(self):
@@ -68,9 +68,7 @@ class TestJurisdictionMap(unittest.TestCase):
         chunks = json.loads(config.CHUNKS_FILE.read_text(encoding="utf-8"))
         present = {c["metadata"]["jurisdiction"] for c in chunks}
         mapped = {v for values in JURISDICTION_MAP.values() for v in values}
-        # Qatar_National is reserved for Law 13/2016, which needs manual
-        # sourcing (almeezan.qa has a broken TLS chain) -- see download_docs.py.
-        missing = mapped - present - {"Qatar_National"}
+        missing = mapped - present
         self.assertEqual(missing, set(), f"mapped but not ingested: {missing}")
 
     def test_every_corpus_jurisdiction_is_reachable(self):
@@ -92,7 +90,7 @@ class TestJurisdictionMap(unittest.TestCase):
         # Asserting an exact count here just breaks every time a regulator is
         # added; what matters is that each named body is actually present.
         self.assertLessEqual(
-            {"UAE_DHA_Dubai", "UAE_DoH_AbuDhabi", "UAE_National"},
+            {"UAE_DHA_Dubai", "UAE_DoH_AbuDhabi", "UAE_Federal"},
             set(JURISDICTION_MAP["uae"]),
         )
         self.assertLessEqual(
@@ -357,6 +355,40 @@ class TestAskValidation(unittest.TestCase):
     def test_unknown_jurisdiction_raises_value_error(self):
         with self.assertRaises(ValueError):
             _bare_rag().ask("q", jurisdiction="atlantis")
+
+
+class TestCanonicalCitations(unittest.TestCase):
+    """gpt-oss writes 【Source 2】; everything downstream expects [Source 2]."""
+
+    def test_lenticular_brackets(self):
+        self.assertEqual(rp.canonical_citations("x 【Source 2】."), "x [Source 2].")
+
+    def test_fullwidth_brackets(self):
+        self.assertEqual(rp.canonical_citations("［Source 3］"), "[Source 3]")
+
+    def test_grouped_citation_keeps_every_number(self):
+        self.assertEqual(rp.canonical_citations("[Source 1, Source 3]"),
+                         "[Source 1][Source 3]")
+
+    def test_grouped_bare_numbers(self):
+        self.assertEqual(rp.canonical_citations("【Source 1, 4】"),
+                         "[Source 1][Source 4]")
+
+    def test_trailing_detail_dropped(self):
+        self.assertEqual(rp.canonical_citations("[Source 2: doc_2023.pdf | p.5]"),
+                         "[Source 2]")
+
+    def test_dagger_line_refs(self):
+        self.assertEqual(rp.canonical_citations("【Source 1†L10-L12】"),
+                         "[Source 1]")
+
+    def test_other_brackets_untouched(self):
+        text = "See [1] and 【note】 and (Source 2)."
+        self.assertEqual(rp.canonical_citations(text), text)
+
+    def test_shared_regex_matches_all_styles(self):
+        found = config.CITATION_RE.findall("[Source 1] 【Source 2】 ［Source 3］")
+        self.assertEqual(found, ["1", "2", "3"])
 
 
 if __name__ == "__main__":

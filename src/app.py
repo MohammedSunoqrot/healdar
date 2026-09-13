@@ -1,25 +1,31 @@
 """
 Healdar — Health AI Regulatory Navigator
-Streamlit frontend
+Streamlit frontend.
+
+Theming: Streamlit draws its own widgets from the light and dark palettes in
+.streamlit/config.toml and follows the visitor's system setting (switchable
+from the ⋮ menu → Settings). Healdar's own components — answer card,
+references, notices — take their colours from the inherited text colour via
+CSS color-mix(), so they follow whichever theme is active without the app
+having to know which one that is. (The previous version repainted a "light
+mode" with CSS overrides over a forced dark theme; Streamlit's widgets never
+got those colours, which is why light mode had black buttons and header.)
 """
 
+import csv
 import dataclasses
 import html as _html
+import importlib
+import io
 import json
 import logging
-import re
 import sys
+import time as _time
+from datetime import date, datetime
 from pathlib import Path
 
 import streamlit as st
 import streamlit.components.v1 as _components
-
-logger = logging.getLogger("healdar.app")
-
-# ---------------------------------------------------------------------------
-# Path setup — app.py lives in code/, so rag_pipeline is in the same directory
-# ---------------------------------------------------------------------------
-import importlib
 
 SCRIPT_DIR   = Path(__file__).resolve().parent   # src/
 PROJECT_ROOT = SCRIPT_DIR.parent                  # Healdar/
@@ -33,10 +39,9 @@ import config
 if config.DEV_MODE and "rag_pipeline" in sys.modules:
     importlib.reload(sys.modules["rag_pipeline"])
 
-import time as _time
-
 import analytics as _analytics
 import export as _export
+import formatting
 from rag_pipeline import (
     HealdarError,
     HealdarRAG,
@@ -47,691 +52,422 @@ from rag_pipeline import (
     ServiceUnavailableError,
 )
 
+logger = logging.getLogger("healdar.app")
+
 # ---------------------------------------------------------------------------
-# Jurisdiction metadata — keys match rag_pipeline.py JURISDICTION_MAP
+# Jurisdictions — keys match rag_pipeline.JURISDICTION_MAP
 # ---------------------------------------------------------------------------
 JURISDICTIONS = {
-    "all":   {"flag": "🌍", "en": "All Jurisdictions",     "ar": "جميع الجهات",                        "color": "#555B6E"},
-    "sfda":  {"flag": "🇸🇦", "en": "Saudi Arabia (SFDA)",  "ar": "المملكة العربية السعودية (SFDA)",     "color": "#00843D"},
-    "uae":   {"flag": "🇦🇪", "en": "UAE (DoH)",            "ar": "الإمارات العربية المتحدة (DoH)",      "color": "#CC0001"},
-    "qatar": {"flag": "🇶🇦", "en": "Qatar (MOPH)",         "ar": "قطر (وزارة الصحة العامة)",           "color": "#8D1B3D"},
-    "eu":    {"flag": "🇪🇺", "en": "European Union (MDR)", "ar": "الاتحاد الأوروبي (MDR)",             "color": "#003399"},
-    "fda":   {"flag": "🇺🇸", "en": "United States (FDA)",  "ar": "الولايات المتحدة الأمريكية (FDA)",   "color": "#1A1A6E"},
-    "intl":  {"flag": "🌐", "en": "International (WHO)",   "ar": "دولي (منظمة الصحة العالمية)",        "color": "#0072CE"},
+    "all":   {"flag": "🌍", "color": "#555B6E",
+              "en": "All jurisdictions", "short_en": "All jurisdictions",
+              "ar": "جميع الجهات", "short_ar": "جميع الجهات"},
+    "sfda":  {"flag": "🇸🇦", "color": "#00843D",
+              "en": "Saudi Arabia · SFDA, SDAIA, NHIC", "short_en": "Saudi Arabia",
+              "ar": "السعودية · SFDA، SDAIA، NHIC", "short_ar": "السعودية"},
+    "uae":   {"flag": "🇦🇪", "color": "#CC0001",
+              "en": "UAE · Federal, DoH, DHA", "short_en": "UAE",
+              "ar": "الإمارات · اتحادي، دائرة الصحة، هيئة الصحة", "short_ar": "الإمارات"},
+    "qatar": {"flag": "🇶🇦", "color": "#8D1B3D",
+              "en": "Qatar · MOPH, MCIT, NCSA, law", "short_en": "Qatar",
+              "ar": "قطر · وزارة الصحة، الاتصالات، الأمن السيبراني، القانون", "short_ar": "قطر"},
+    "eu":    {"flag": "🇪🇺", "color": "#003399",
+              "en": "European Union · MDR, IVDR, AI Act", "short_en": "European Union",
+              "ar": "الاتحاد الأوروبي · MDR، IVDR، AI Act", "short_ar": "الاتحاد الأوروبي"},
+    "fda":   {"flag": "🇺🇸", "color": "#1A1A6E",
+              "en": "United States · FDA", "short_en": "United States",
+              "ar": "الولايات المتحدة · FDA", "short_ar": "الولايات المتحدة"},
+    "intl":  {"flag": "🌐", "color": "#0072CE",
+              "en": "International · WHO, IMDRF", "short_en": "International",
+              "ar": "دولي · WHO، IMDRF", "short_ar": "دولي"},
+}
+
+# Folder tag in the index → jurisdiction key above (for colours).
+JX_COLOR_MAP: dict[str, str] = {
+    "EU_Legislation":    "eu",
+    "EU_MDCG":           "eu",
+    "EU_AI_Office":      "eu",
+    "KSA_SFDA":          "sfda",
+    "KSA_SDAIA":         "sfda",
+    "KSA_NHIC":          "sfda",
+    "Qatar_MOPH":        "qatar",
+    "Qatar_MCIT":        "qatar",
+    "Qatar_NCSA":        "qatar",
+    "Qatar_Legislation": "qatar",
+    "UAE_Federal":       "uae",
+    "UAE_DoH_AbuDhabi":  "uae",
+    "UAE_DHA_Dubai":     "uae",
+    "USA_FDA":           "fda",
+    "INT_WHO":           "intl",
+    "INT_IMDRF":         "intl",
 }
 
 # ---------------------------------------------------------------------------
-# UI string translations (English / Arabic)
+# UI strings (English / Arabic)
 # ---------------------------------------------------------------------------
 T = {
     "en": {
         "tagline":        "Health AI Regulatory Intelligence",
-        "q_placeholder":  "e.g. What are the post-market surveillance requirements for AI medical devices?",
-        "submit":         "🔍  Ask Healdar",
-        "clear":          "✕  Clear",
-        "sources_label":  "📄  Sources",
-        "disclaimer":     "For informational purposes only. Always consult official regulatory bodies.",
-        "compare_toggle": "⚖️  Enable Comparison Mode",
+        "q_placeholder":  "Ask about health-AI regulation, e.g. post-market surveillance for AI medical devices",
+        "ask":            "Ask",
+        "disclaimer":     "For informational purposes only — not legal or regulatory advice. Always verify against the official documents.",
+        "compare_toggle": "⚖️ Compare two jurisdictions",
         "jx_label":       "Jurisdiction",
-        "compare_left":   "First Jurisdiction",
-        "compare_right":  "Second Jurisdiction",
-        "about_title":    "About Healdar",
+        "compare_left":   "First jurisdiction",
+        "compare_right":  "Second jurisdiction",
+        "about_title":    "ℹ️ About Healdar",
         "about_body":     (
-            "Healdar is an AI-powered regulatory intelligence tool that helps you navigate "
-            "health AI regulations across the Gulf region, Europe, and the United States. "
-            "Answers are grounded in official regulatory documents."
+            "Healdar answers questions about health-AI regulation using only official "
+            "documents from Gulf, European, US and international regulators. Every claim "
+            "is cited to a document and page; when the documents don't cover a question, "
+            "Healdar says so instead of guessing."
         ),
-        "loading":        "Searching regulatory documents…",
-        "lang_label":     "🌐 Language",
-        "no_context":     "No relevant content found in the selected jurisdiction's documents for this query.",
+        "theme_hint":     "Light or dark mode follows your system. Change it any time from ⋮ → Settings.",
+        "loading":        "Searching the regulatory documents…",
+        "loading_index":  "Loading the regulatory index…",
+        "lang_label":     "Language",
+        "no_context":     "No relevant material was found in the selected documents for this question. Try another jurisdiction or rephrase.",
         "copy":           "📋 Copy",
         "copied":         "✓ Copied",
         "page":           "p.",
-        "light_mode":     "☀️ Light Mode",
-        "dark_mode":      "🌙 Dark Mode",
         "clear_history":  "🗑 Clear history",
         "history_label":  "Recent questions",
-        "export_pdf":       "📄 PDF",
-        "export_word":      "📝 Word",
-        "analytics_title":  "📊 Analytics",
-        "analytics_today":  "today",
-        "analytics_dl":     "⬇ Download CSV",
-        "rate_limit":       "⏳ API rate limit reached — please wait a moment and try again.",
-        "starter_prompt":   "Try asking:",
-        "weak_match":       "Only loosely related material was found — verify against the source documents before relying on this.",
-        "partial_answer":   "The retrieved documents only partly cover this question. Treat the answer as incomplete.",
-        "relevance":        "match",
-        "err_title":        "Healdar is temporarily unavailable",
-        "err_model":        "The configured language model was rejected by the provider. It has most likely been retired — set GROQ_MODEL_ANSWER to a current model.",
-        "err_service":      "The language model service is unreachable right now. Please try again shortly.",
-        "err_retrieval":    "The regulatory index could not be searched. This is a system fault, not an absence of regulation.",
-        "err_generic":      "Something went wrong handling that request.",
-        "throttled":        "You have reached this session's query limit. Please wait a little before asking again.",
+        "export_pdf":     "📄 PDF",
+        "export_word":    "📝 Word",
+        "session_title":  "📊 Your session",
+        "session_empty":  "A summary of your questions in this session will appear here.",
+        "session_note":   "Only your own questions in this browser tab. Nothing here is shared with other visitors, and it resets when you close the tab.",
+        "stat_questions": "Questions",
+        "stat_avg":       "Avg. time",
+        "stat_answered":  "Answered",
+        "stat_compare":   "Comparisons",
+        "stat_lang":      "Language",
+        "stat_jx":        "Jurisdictions",
+        "session_dl":     "⬇ Download my session (CSV)",
+        "rate_limit":     "⏳ The language-model rate limit was reached — please wait a moment and try again.",
+        "starter_prompt": "Try asking",
+        "weak_match":     "Only loosely related material was found — verify against the source documents before relying on this.",
+        "partial_answer": "The documents only partly cover this question. Treat the answer as incomplete.",
+        "err_title":      "Healdar is temporarily unavailable",
+        "err_model":      "The configured language model was rejected by the provider. It has most likely been retired — set GROQ_MODEL_ANSWER to a current model.",
+        "err_service":    "The language-model service is unreachable right now. Please try again shortly.",
+        "err_retrieval":  "The regulatory index could not be searched. This is a system fault, not an absence of regulation.",
+        "err_generic":    "Something went wrong handling that request.",
+        "throttled":      "You have reached this session's question limit. Please wait a little before asking again.",
+        "references":     "References",
+        "version":        "Version",
+        "released":       "Released",
+        "corpus_line":    "{docs} official documents · {bodies} regulators",
+        "developed_by":   "Developed by",
+        "sources_meta":   "{n} cited sources",
     },
     "ar": {
-        "tagline":        "الذكاء التنظيمي للصحة الرقمية",
-        "q_placeholder":  "مثال: ما هي متطلبات مراقبة ما بعد التسويق لأجهزة الذكاء الاصطناعي الطبية؟",
-        "submit":         "🔍  اسأل هيلدار",
-        "clear":          "✕  مسح",
-        "sources_label":  "📄  المصادر",
-        "disclaimer":     "لأغراض إعلامية فقط. استشر دائماً الهيئات التنظيمية الرسمية.",
-        "compare_toggle": "⚖️  وضع المقارنة",
+        "tagline":        "الذكاء التنظيمي للذكاء الاصطناعي الصحي",
+        "q_placeholder":  "اسأل عن تنظيم الذكاء الاصطناعي الصحي، مثل مراقبة ما بعد التسويق للأجهزة الطبية",
+        "ask":            "اسأل",
+        "disclaimer":     "لأغراض إعلامية فقط، وليست استشارة قانونية أو تنظيمية. تحقّق دائماً من الوثائق الرسمية.",
+        "compare_toggle": "⚖️ المقارنة بين جهتين",
         "jx_label":       "الجهة التنظيمية",
         "compare_left":   "الجهة الأولى",
         "compare_right":  "الجهة الثانية",
-        "about_title":    "حول هيلدار",
+        "about_title":    "ℹ️ حول هيلدار",
         "about_body":     (
-            "هيلدار أداة ذكاء اصطناعي متخصصة في اللوائح التنظيمية للصحة الرقمية "
-            "في منطقة الخليج وأوروبا والولايات المتحدة. تستند الإجابات إلى وثائق تنظيمية رسمية معتمدة."
+            "يجيب هيلدار عن أسئلة تنظيم الذكاء الاصطناعي الصحي اعتماداً على الوثائق الرسمية "
+            "فقط من الجهات التنظيمية الخليجية والأوروبية والأمريكية والدولية. كل معلومة موثّقة "
+            "بالوثيقة ورقم الصفحة، وعندما لا تغطي الوثائق السؤال يوضّح ذلك بدلاً من التخمين."
         ),
+        "theme_hint":     "يتبع الوضع الفاتح أو الداكن إعدادات جهازك، ويمكن تغييره من ⋮ ← الإعدادات.",
         "loading":        "جارٍ البحث في الوثائق التنظيمية…",
-        "lang_label":     "🌐 اللغة",
-        "no_context":     "لم يُعثر على محتوى ذي صلة في وثائق الجهة التنظيمية المختارة.",
+        "loading_index":  "جارٍ تحميل فهرس الوثائق…",
+        "lang_label":     "اللغة",
+        "no_context":     "لم يُعثر على محتوى ذي صلة في الوثائق المختارة لهذا السؤال. جرّب جهة أخرى أو أعد صياغة السؤال.",
         "copy":           "📋 نسخ",
         "copied":         "✓ تم النسخ",
         "page":           "ص.",
-        "light_mode":     "☀️ الوضع الفاتح",
-        "dark_mode":      "🌙 الوضع الداكن",
-        "clear_history":  "🗑 مسح المحادثة",
+        "clear_history":  "🗑 مسح السجل",
         "history_label":  "الأسئلة الأخيرة",
-        "export_pdf":       "📄 PDF",
-        "export_word":      "📝 Word",
-        "analytics_title":  "📊 الإحصائيات",
-        "analytics_today":  "اليوم",
-        "analytics_dl":     "⬇ تنزيل CSV",
-        "rate_limit":       "⏳ تم الوصول إلى حد الطلبات — يرجى الانتظار لحظة ثم المحاولة مجدداً.",
-        "starter_prompt":   "جرّب أن تسأل:",
-        "weak_match":       "لم يُعثر إلا على محتوى ضعيف الصلة — يُرجى التحقق من الوثائق الرسمية قبل الاعتماد على هذه الإجابة.",
-        "partial_answer":   "الوثائق المسترجَعة تغطي هذا السؤال جزئياً فقط. اعتبر الإجابة غير مكتملة.",
-        "relevance":        "تطابق",
-        "err_title":        "هيلدار غير متاح مؤقتاً",
-        "err_model":        "رفض المزوّد النموذج اللغوي المُهيأ، وعلى الأرجح تم إيقافه — يُرجى ضبط GROQ_MODEL_ANSWER على نموذج حالي.",
-        "err_service":      "خدمة النموذج اللغوي غير متاحة حالياً. يُرجى المحاولة بعد قليل.",
-        "err_retrieval":    "تعذّر البحث في فهرس الوثائق التنظيمية. هذا خلل تقني وليس غياباً للتشريع.",
-        "err_generic":      "حدث خطأ أثناء معالجة الطلب.",
-        "throttled":        "لقد بلغت حد عدد الأسئلة لهذه الجلسة. يُرجى الانتظار قليلاً.",
+        "export_pdf":     "📄 PDF",
+        "export_word":    "📝 Word",
+        "session_title":  "📊 جلستك",
+        "session_empty":  "سيظهر هنا ملخص أسئلتك في هذه الجلسة.",
+        "session_note":   "أسئلتك أنت فقط في علامة التبويب هذه. لا يُشارك أي شيء مع الزوار الآخرين، ويُمسح عند إغلاق الصفحة.",
+        "stat_questions": "الأسئلة",
+        "stat_avg":       "متوسط الوقت",
+        "stat_answered":  "تمت الإجابة",
+        "stat_compare":   "المقارنات",
+        "stat_lang":      "اللغة",
+        "stat_jx":        "الجهات",
+        "session_dl":     "⬇ تنزيل جلستي (CSV)",
+        "rate_limit":     "⏳ تم الوصول إلى حد الطلبات — يرجى الانتظار لحظة ثم المحاولة مجدداً.",
+        "starter_prompt": "جرّب أن تسأل",
+        "weak_match":     "لم يُعثر إلا على محتوى ضعيف الصلة — يُرجى التحقق من الوثائق الرسمية قبل الاعتماد على هذه الإجابة.",
+        "partial_answer": "الوثائق تغطي هذا السؤال جزئياً فقط. اعتبر الإجابة غير مكتملة.",
+        "err_title":      "هيلدار غير متاح مؤقتاً",
+        "err_model":      "رفض المزوّد النموذج اللغوي المُهيأ، وعلى الأرجح تم إيقافه — يُرجى ضبط GROQ_MODEL_ANSWER على نموذج حالي.",
+        "err_service":    "خدمة النموذج اللغوي غير متاحة حالياً. يُرجى المحاولة بعد قليل.",
+        "err_retrieval":  "تعذّر البحث في فهرس الوثائق التنظيمية. هذا خلل تقني وليس غياباً للتشريع.",
+        "err_generic":    "حدث خطأ أثناء معالجة الطلب.",
+        "throttled":      "لقد بلغت حد عدد الأسئلة لهذه الجلسة. يُرجى الانتظار قليلاً.",
+        "references":     "المصادر",
+        "version":        "الإصدار",
+        "released":       "تاريخ الإصدار",
+        "corpus_line":    "{docs} وثيقة رسمية · {bodies} جهة تنظيمية",
+        "developed_by":   "تطوير",
+        "sources_meta":   "{n} مصادر مستشهد بها",
     },
 }
 
-# ---------------------------------------------------------------------------
-# CSS — theme palettes and structural rules
-# ---------------------------------------------------------------------------
-
-# All colors are CSS custom properties so only :root changes per theme.
-_THEME_VARS = {
-    "dark": (
-        "--bg-main:#0e1117;--bg-sidebar:#161b27;--bg-card:#161b27;"
-        "--bg-hover:#1e2438;--border:#2a2f45;"
-        "--text-primary:#dde2ef;--text-secondary:#7a8499;--text-muted:#454e63;"
-        "--text-src:#8a93a8;--text-num:#5a6480;--text-disc:#525a6e;"
-        "--title-color:#f0f2f6;--tagline-color:#7a8499;"
-        "--modal-bg:#1a1f30;--modal-border:#3a4060;"
-        "--modal-jx:#6b7a99;--modal-body:#c0c8dc;--modal-close-hover:#2a2f45;"
-        "--copy-border:#2a2f45;--copy-color:#7a8499;"
-        "--copy-hover-border:#4a5568;--copy-hover-color:#a0aec0;"
-    ),
-    "light": (
-        "--bg-main:#f2f5fc;--bg-sidebar:#e8ecf6;--bg-card:#ffffff;"
-        "--bg-hover:#edf1fb;--border:#cdd4ea;"
-        "--text-primary:#1c2340;--text-secondary:#4f6080;--text-muted:#8898b8;"
-        "--text-src:#4f6080;--text-num:#6878a0;--text-disc:#7888a8;"
-        "--title-color:#1c2340;--tagline-color:#4f6080;"
-        "--modal-bg:#ffffff;--modal-border:#cdd4ea;"
-        "--modal-jx:#5868a0;--modal-body:#2c3860;--modal-close-hover:#edf1fb;"
-        "--copy-border:#cdd4ea;--copy-color:#5868a0;"
-        "--copy-hover-border:#9aaad0;--copy-hover-color:#1c2340;"
-    ),
+STARTERS = {
+    "en": [
+        "What are the post-market surveillance requirements for AI medical devices?",
+        "How does SFDA regulate AI-based Software as a Medical Device?",
+        "What does the EU AI Act require for high-risk medical AI systems?",
+        "When is clinical decision support software regulated by the FDA?",
+        "Can patient data be reused to train AI models under Saudi data protection rules?",
+        "What are the IMDRF good machine learning practice principles?",
+    ],
+    "ar": [
+        "ما هي متطلبات مراقبة ما بعد التسويق لأجهزة الذكاء الاصطناعي الطبية؟",
+        "كيف تنظّم هيئة الغذاء والدواء السعودية البرمجيات الطبية القائمة على الذكاء الاصطناعي؟",
+        "ما متطلبات قانون الاتحاد الأوروبي للذكاء الاصطناعي للأنظمة الطبية عالية المخاطر؟",
+        "متى تخضع برمجيات دعم القرار السريري لتنظيم إدارة الغذاء والدواء الأمريكية؟",
+        "ما حقوق صاحب البيانات في قانون حماية البيانات الشخصية الإماراتي؟",
+        "ما مبادئ الممارسة الجيدة للتعلم الآلي الصادرة عن IMDRF؟",
+    ],
 }
 
-_LIGHT_WIDGET_OVERRIDES = """
-    body, .stApp { background-color: var(--bg-main) !important; }
+_AR_MONTHS = ["يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو", "يوليو",
+              "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر"]
 
-    /* ── Inputs ── */
-    [data-testid="stTextInput"] input {
-        background: #fff !important; color: var(--text-primary) !important;
-        border-color: var(--border) !important;
-    }
 
-    /* ── Selectbox ── */
-    [data-testid="stSelectbox"] > div > div {
-        background: #fff !important; color: var(--text-primary) !important;
-        border-color: var(--border) !important;
-    }
-    div[data-baseweb="select"] * { color: var(--text-primary) !important; }
-    [data-baseweb="popover"] * { background: #fff !important; color: var(--text-primary) !important; }
+def release_date_label(lang: str) -> str:
+    d = date.fromisoformat(config.RELEASE_DATE)
+    if lang == "ar":
+        return f"{d.day} {_AR_MONTHS[d.month - 1]} {d.year}"
+    return d.strftime("%d %b %Y").lstrip("0")
 
-    /* ── All sidebar text ── */
-    [data-testid="stSidebar"] * { color: var(--text-primary) !important; }
 
-    /* ── Radio / toggle / checkbox labels ── */
-    label, .stRadio label, .stCheckbox label,
-    [data-testid="stToggle"] label,
-    [data-testid="stWidgetLabel"] { color: var(--text-primary) !important; }
+# ---------------------------------------------------------------------------
+# CSS — theme-agnostic: every colour is derived from the inherited text colour
+# (currentColor) or is a brand colour that reads on both backgrounds.
+# ---------------------------------------------------------------------------
+_CSS = """
+<style>
+:root { --hd-accent: #3B5BDB; }
 
-    /* ── Expander ── */
-    .streamlit-expanderHeader,
-    [data-testid="stExpander"] summary,
-    [data-testid="stExpander"] summary p { color: var(--text-primary) !important; }
-    [data-testid="stExpander"] { border-color: var(--border) !important; }
+/* Header */
+.hd-header { text-align:center; padding:1rem 0 .3rem; }
+.hd-logo { font-size:2.5rem; line-height:1; }
+.hd-title { font-size:2.4rem; font-weight:800; letter-spacing:-.5px; margin:.25rem 0 0; }
+.hd-tagline { opacity:.72; font-size:1rem; }
+.hd-corpus { display:inline-block; margin-top:.55rem; font-size:.78rem; padding:.2rem .75rem;
+  border-radius:999px; background:color-mix(in srgb, currentColor 6%, transparent);
+  border:1px solid color-mix(in srgb, currentColor 12%, transparent); }
+.hd-rtl { direction:rtl; text-align:right; }
 
-    /* ── Markdown / paragraph text ── */
-    [data-testid="stSidebar"] p,
-    [data-testid="stSidebar"] span,
-    [data-testid="stSidebar"] div { color: var(--text-primary) !important; }
+/* Question bubble */
+.hd-q { margin:1.1rem 0 .55rem; padding:.6rem 1rem; border-radius:12px;
+  border-inline-start:3px solid var(--hd-accent);
+  background:color-mix(in srgb, currentColor 4%, transparent); font-size:.95rem; }
 
-    /* ── Horizontal rules ── */
-    hr { border-color: var(--border) !important; }
+/* Answer card */
+.hd-card { border:1px solid color-mix(in srgb, currentColor 13%, transparent);
+  background:color-mix(in srgb, currentColor 2.5%, transparent);
+  border-radius:14px; padding:1.15rem 1.45rem .85rem; margin:.25rem 0 .55rem;
+  font-size:.97rem; line-height:1.75; }
+.hd-card-head { display:flex; justify-content:space-between; align-items:center;
+  gap:.6rem; margin-bottom:.85rem; flex-wrap:wrap; }
+.hd-badge { display:inline-flex; align-items:center; gap:.35rem; padding:.22rem .8rem;
+  border-radius:999px; font-size:.78rem; font-weight:700; color:#fff; }
+.hd-meta { font-size:.72rem; opacity:.6; }
+.hd-body p { margin:0 0 .75rem; }
+.hd-body ul, .hd-body ol { margin:0 0 .85rem; padding-inline-start:1.4rem; }
+.hd-body li { margin-bottom:.35rem; }
+.hd-body .ans-h { font-weight:700; margin:1rem 0 .35rem; }
+.hd-body code { font-size:.86em; padding:.05rem .3rem; border-radius:4px;
+  background:color-mix(in srgb, currentColor 8%, transparent); }
+.ans-table { overflow-x:auto; margin:.3rem 0 .9rem; }
+.ans-table table { border-collapse:collapse; width:100%; font-size:.86rem; }
+.ans-table th, .ans-table td { border:1px solid color-mix(in srgb, currentColor 15%, transparent);
+  padding:.4rem .6rem; text-align:start; vertical-align:top; }
+.ans-table th { background:color-mix(in srgb, currentColor 6%, transparent); }
+.fn-ref { color:color-mix(in srgb, var(--hd-accent) 72%, currentColor); font-size:.72em;
+  font-weight:700; vertical-align:super; cursor:help; margin-inline-start:1px; }
+
+/* Notices */
+.notice { display:flex; gap:.5rem; align-items:flex-start;
+  background:color-mix(in srgb, #D69E2E 13%, transparent);
+  border:1px solid color-mix(in srgb, #D69E2E 45%, transparent);
+  border-radius:9px; padding:.55rem .8rem; margin:0 0 .85rem; font-size:.84rem; line-height:1.5; }
+.no-context { opacity:.78; font-style:italic; text-align:center; padding:1.1rem 0; }
+
+/* References — native <details>, so they open without any JavaScript */
+.refs-section { border-top:1px solid color-mix(in srgb, currentColor 12%, transparent);
+  margin-top:1rem; padding-top:.55rem; }
+.refs-title { font-size:.68rem; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+  opacity:.55; margin-bottom:.25rem; }
+details.ref > summary { list-style:none; display:flex; align-items:center; gap:.5rem;
+  cursor:pointer; padding:.3rem .45rem; border-radius:7px; font-size:.83rem; }
+details.ref > summary::-webkit-details-marker { display:none; }
+details.ref > summary:hover { background:color-mix(in srgb, currentColor 6%, transparent); }
+.ref-num { font-weight:700; color:color-mix(in srgb, var(--hd-accent) 72%, currentColor);
+  min-width:1.7rem; font-size:.78rem; }
+.ref-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+.ref-label { flex:1; opacity:.88; line-height:1.35; }
+.ref-score { font-size:.7rem; opacity:.6; font-variant-numeric:tabular-nums; }
+.ref-toggle { font-size:.7rem; opacity:.5; width:.9rem; text-align:center; }
+.ref-toggle::after { content:"▾"; }
+details.ref[open] .ref-toggle::after { content:"▴"; }
+.ref-excerpt { margin:.15rem 0 .55rem 2.2rem; padding:.6rem .85rem; border-left:3px solid;
+  border-radius:0 6px 6px 0; background:color-mix(in srgb, currentColor 4%, transparent);
+  font-size:.8rem; line-height:1.6; white-space:pre-wrap; max-height:15rem; overflow:auto; }
+.refs-section.hd-rtl .ref-excerpt { margin:.15rem 2.2rem .55rem 0; border-left:none;
+  border-right:3px solid; border-radius:6px 0 0 6px; }
+.disclaimer { font-size:.74rem; opacity:.58; margin-top:.8rem; padding-top:.6rem;
+  border-top:1px solid color-mix(in srgb, currentColor 10%, transparent); text-align:center; }
+
+/* Sidebar */
+.sidebar-label { font-size:.68rem; font-weight:700; letter-spacing:1px; text-transform:uppercase;
+  opacity:.58; margin:.85rem 0 .2rem; }
+.hd-brand { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
+.hd-brand-name { font-weight:800; font-size:1.3rem; }
+.hd-ver { display:inline-block; font-size:.72rem; padding:.12rem .55rem; border-radius:999px;
+  font-weight:700; background:color-mix(in srgb, var(--hd-accent) 16%, transparent);
+  color:color-mix(in srgb, var(--hd-accent) 75%, currentColor); }
+.hd-ver-date { font-size:.74rem; opacity:.65; margin:.15rem 0 .2rem; }
+.hd-stats { display:grid; grid-template-columns:1fr 1fr; gap:.45rem; margin:.2rem 0 .55rem; }
+.hd-stat { border:1px solid color-mix(in srgb, currentColor 12%, transparent);
+  border-radius:9px; padding:.4rem .55rem; }
+.hd-stat-l { font-size:.68rem; opacity:.62; }
+.hd-stat-v { font-size:1.12rem; font-weight:700; }
+.hd-bar { display:flex; align-items:center; gap:.45rem; font-size:.76rem; margin:.15rem 0; }
+.hd-bar-name { width:6.2rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hd-bar-track { flex:1; height:6px; border-radius:4px;
+  background:color-mix(in srgb, currentColor 10%, transparent); }
+.hd-bar-fill { height:6px; border-radius:4px; background:var(--hd-accent); }
+.hd-small { font-size:.74rem; opacity:.65; line-height:1.45; }
+.hd-foot { margin-top:1.2rem; padding-top:.75rem;
+  border-top:1px solid color-mix(in srgb, currentColor 12%, transparent); font-size:.76rem; }
+a.hd-li { display:inline-flex; align-items:center; gap:.35rem; margin-top:.35rem;
+  padding:.25rem .65rem; border-radius:5px; background:#0A66C2; color:#fff !important;
+  text-decoration:none !important; font-weight:600; font-size:.72rem; }
+[data-testid="stSidebar"] [data-testid="stBaseButton-tertiary"] {
+  justify-content:flex-start; text-align:start; }
+[data-testid="stSidebar"] [data-testid="stBaseButton-tertiary"] p {
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+</style>
 """
 
-def inject_css(theme: str = "dark") -> None:
-    vars_css   = _THEME_VARS.get(theme, _THEME_VARS["dark"])
-    extra      = _LIGHT_WIDGET_OVERRIDES if theme == "light" else ""
 
-    st.markdown(
-        f"""
-        <style>
-        :root {{ {vars_css} }}
-        /* ── Base ── */
-        [data-testid="stAppViewContainer"] {{ background-color: var(--bg-main); }}
-        [data-testid="stSidebar"]          {{ background-color: var(--bg-sidebar); border-right: 1px solid var(--border); }}
-        [data-testid="stSidebar"] > div:first-child {{ padding-bottom: 6rem; }}
-        [data-testid="stSidebar"] hr       {{ border-color: var(--border); }}
-
-        /* ── Header ── */
-        .rr-header  {{ text-align: center; padding: 2rem 0 1.2rem; }}
-        .rr-emoji   {{ font-size: 3rem; line-height: 1.1; }}
-        .rr-title   {{ font-size: 2.8rem; font-weight: 800; color: var(--title-color); letter-spacing: -0.5px; margin: 0.1rem 0; }}
-        .rr-tagline {{ color: var(--tagline-color); font-size: 1rem; letter-spacing: 0.4px; }}
-        .rr-divider {{ border: none; border-top: 1px solid var(--border); margin: 1.2rem 0 1.8rem; }}
-
-        /* ── Answer card ── */
-        .answer-card {{
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 1.4rem 1.8rem 1rem;
-            margin-top: 0.6rem;
-            color: var(--text-primary);
-            font-size: 0.96rem;
-            line-height: 1.8;
-        }}
-        /* Sidebar history list */
-        div[data-testid="stSidebar"] .hist-item button {{
-            background: transparent !important;
-            border: none !important;
-            border-radius: 6px !important;
-            color: var(--text-secondary) !important;
-            font-size: 0.8rem !important;
-            text-align: left !important;
-            padding: 0.35rem 0.6rem !important;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            width: 100%;
-            cursor: pointer;
-            transition: background 0.15s;
-        }}
-        div[data-testid="stSidebar"] .hist-item button:hover {{
-            background: var(--bg-hover, rgba(255,255,255,0.07)) !important;
-            color: var(--text-primary) !important;
-        }}
-        div[data-testid="stSidebar"] .hist-item-active button {{
-            background: var(--bg-hover, rgba(255,255,255,0.1)) !important;
-            color: var(--text-primary) !important;
-            font-weight: 600 !important;
-        }}
-        /* Question bubble shown above each answer card */
-        .chat-q-bubble {{
-            display: inline-block;
-            max-width: 75%;
-            background: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 18px 18px 18px 4px;
-            padding: 0.55rem 1rem;
-            margin: 1.4rem 0 0.5rem;
-            font-size: 0.92rem;
-            color: var(--text-secondary);
-            font-style: italic;
-        }}
-        .chat-q-bubble.rtl {{
-            border-radius: 18px 18px 4px 18px;
-            margin-left: auto;
-            display: block;
-            text-align: right;
-        }}
-        /* Subtle divider between history entries */
-        .chat-entry-sep {{
-            border: none;
-            border-top: 1px dashed var(--border);
-            margin: 1.2rem 0 0;
-            opacity: 0.5;
-        }}
-        .answer-card p  {{ margin: 0 0 0.7rem; }}
-        .answer-card br {{ display: block; margin-bottom: 0.4rem; }}
-        .answer-card ul, .answer-card ol {{
-            margin: 0 0 0.8rem 0;
-            padding-left: 1.4rem;
-        }}
-        .answer-card li {{ margin-bottom: 0.3rem; line-height: 1.7; }}
-        /* RTL lists (Arabic) */
-        .rtl ul, .rtl ol {{ padding-left: 0; padding-right: 1.4rem; }}
-        /* RTL refs section */
-        .refs-section.rtl {{ direction: rtl; text-align: right; }}
-        .refs-section.rtl .ref-row {{ flex-direction: row-reverse; }}
-        .refs-section.rtl .ref-excerpt {{ margin: 0.05rem 2.3rem 0.4rem 0; }}
-
-        /* ── Card header ── */
-        .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }}
-
-        /* ── Jurisdiction badge ── */
-        .jx-badge {{ display: inline-block; padding: 4px 14px; border-radius: 20px; font-size: 0.78rem; font-weight: 700; color: #fff; letter-spacing: 0.2px; }}
-
-        /* ── Footnote superscript in answer text ── */
-        .fn-ref {{
-            color: #3b5bdb;
-            font-size: 0.72em;
-            font-weight: 700;
-            vertical-align: super;
-            cursor: default;
-            letter-spacing: 0;
-        }}
-
-        /* ── References section ── */
-        .refs-section {{
-            border-top: 1px solid var(--border);
-            margin-top: 1.1rem;
-            padding-top: 0.6rem;
-        }}
-        .refs-title {{
-            font-size: 0.67rem;
-            font-weight: 700;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-            color: var(--text-muted);
-            margin-bottom: 0.3rem;
-        }}
-        /* One reference row: [N] · dot · label · toggle arrow */
-        .ref-row {{
-            display: flex;
-            align-items: center;
-            gap: 0.45rem;
-            padding: 0.26rem 0.4rem;
-            border-radius: 5px;
-            cursor: pointer;
-            user-select: none;
-            transition: background 0.1s;
-        }}
-        .ref-row:hover {{ background: var(--bg-hover); }}
-        .ref-num {{
-            font-size: 0.74rem;
-            font-weight: 700;
-            color: #3b5bdb;
-            min-width: 24px;
-            flex-shrink: 0;
-        }}
-        /* Small colored circle = jurisdiction at a glance */
-        .ref-dot {{
-            width: 7px;
-            height: 7px;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }}
-        .ref-label {{
-            font-size: 0.8rem;
-            color: var(--text-src);
-            flex: 1;
-            line-height: 1.35;
-        }}
-        .ref-toggle {{
-            font-size: 0.7rem;
-            color: var(--text-muted);
-            flex-shrink: 0;
-            width: 14px;
-            text-align: center;
-        }}
-        /* Excerpt expands inline below its row — no modal, no disruption */
-        .ref-excerpt {{
-            display: none;
-            background: var(--bg-hover);
-            border-left: 3px solid #555;
-            border-radius: 0 4px 4px 4px;
-            padding: 0.6rem 0.85rem;
-            margin: 0.05rem 0 0.4rem 2.3rem;
-            font-size: 0.79rem;
-            color: var(--text-secondary);
-            line-height: 1.65;
-            font-style: italic;
-            white-space: pre-wrap;
-        }}
-        .ref-excerpt.open {{ display: block; }}
-
-        /* ── Disclaimer ── */
-        .disclaimer {{ color: var(--text-disc); font-size: 0.76rem; margin-top: 0.9rem; padding-top: 0.7rem; border-top: 1px solid var(--border); text-align: center; }}
-
-        /* ── Caution banner (weak match / partial coverage) ── */
-        .notice {{
-            display: flex;
-            align-items: flex-start;
-            gap: 0.5rem;
-            background: rgba(214, 158, 46, 0.10);
-            border: 1px solid rgba(214, 158, 46, 0.45);
-            border-radius: 8px;
-            padding: 0.55rem 0.8rem;
-            margin: 0 0 0.9rem;
-            font-size: 0.8rem;
-            line-height: 1.5;
-            color: var(--text-primary);
-        }}
-        .notice.rtl {{ direction: rtl; text-align: right; }}
-        .notice-icon {{ flex-shrink: 0; }}
-
-        /* ── Relevance score on a reference row ── */
-        .ref-score {{
-            font-size: 0.68rem;
-            color: var(--text-num);
-            flex-shrink: 0;
-            font-variant-numeric: tabular-nums;
-        }}
-
-        /* ── No-context notice ── */
-        .no-context {{ color: var(--text-secondary); font-style: italic; text-align: center; padding: 1.5rem 0; }}
-
-        /* ── Sidebar micro-labels ── */
-        .sidebar-label {{ font-size: 0.7rem; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: var(--text-muted); margin: 1rem 0 0.3rem; }}
-
-        /* ── RTL helper ── */
-        .rtl {{ direction: rtl; text-align: right; }}
-
-        /* ── Hide form submit button — Enter key still works ── */
-        [data-testid="stFormSubmitButton"] {{ display: none !important; }}
-
-        {extra}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+def inject_css() -> None:
+    st.markdown(_CSS, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
-# Cached RAG pipeline — loads the model once, reused across reruns.
-# Bump _RAG_VERSION after changing rag_pipeline.py to force re-creation.
+# Cached resources
 # ---------------------------------------------------------------------------
-_RAG_VERSION = "7"   # bump to invalidate st.cache_resource after pipeline changes
+_RAG_VERSION = "8"   # bump to invalidate st.cache_resource after pipeline changes
+
 
 @st.cache_resource(show_spinner=False)
 def load_rag(v: str = _RAG_VERSION) -> HealdarRAG:
     return HealdarRAG()
 
 
-# ---------------------------------------------------------------------------
-# Map raw ChromaDB jurisdiction values → JURISDICTIONS keys (for color lookup)
-# ---------------------------------------------------------------------------
-JX_COLOR_MAP: dict[str, str] = {
-    "EU_MDR_MDCG":      "eu",
-    "SFDA":             "sfda",
-    "KSA_SDAIA":        "sfda",
-    "KSA_NHIC":         "sfda",
-    "Qatar_MCIT":       "qatar",
-    "Qatar_MOPH":       "qatar",
-    "Qatar_NCSA":       "qatar",
-    "Qatar_National":   "qatar",
-    "UAE_DHA_Dubai":    "uae",
-    "UAE_DoH_AbuDhabi": "uae",
-    "UAE_National":     "uae",
-    "USA_FDA":          "fda",
-    "International":    "intl",
-}
+@st.cache_data(show_spinner=False)
+def corpus_stats() -> tuple[int, int]:
+    """(documents, regulator folders) in the committed index — shown under the title."""
+    try:
+        chunks = json.loads(config.CHUNKS_FILE.read_text(encoding="utf-8"))
+        docs = {c["metadata"]["filename"] for c in chunks}
+        bodies = {c["metadata"]["jurisdiction"] for c in chunks}
+        return len(docs), len(bodies)
+    except Exception:
+        return 0, 0
 
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
 def jx_color(jurisdiction: str) -> str:
-    return JURISDICTIONS.get(JX_COLOR_MAP.get(jurisdiction, "all"), JURISDICTIONS["all"])["color"]
+    key = JX_COLOR_MAP.get(jurisdiction, "all")
+    return JURISDICTIONS.get(key, JURISDICTIONS["all"])["color"]
 
 
-# ---------------------------------------------------------------------------
-# Helper: prettify a raw filename for display
-#   "SFDA_MDS-G010_AI-ML_Medical_Devices_Guidance_2023.pdf"
-#   → "SFDA MDS-G010 AI-ML Medical Devices Guidance 2023"
-# ---------------------------------------------------------------------------
+def jx_display(jx_key: str, lang: str) -> str:
+    j = JURISDICTIONS[jx_key]
+    return f'{j["flag"]} {j[lang]}'
+
+
+def jx_short(jx_key: str, lang: str) -> str:
+    return JURISDICTIONS[jx_key][f"short_{lang}"]
+
+
 def prettify_filename(filename: str) -> str:
+    """"SFDA_MDS-G010_AI-ML_Guidance_2023.pdf" → "SFDA MDS-G010 AI-ML Guidance 2023"."""
     return Path(filename).stem.replace("_", " ")
 
 
-# ---------------------------------------------------------------------------
-# Helper: numbered source-pill strip with click-to-preview modals
-#
-#   • Each pill is numbered [1][2]… to match [Source N] refs in the answer
-#   • Clicking a pill opens a small modal showing the retrieved text excerpt
-#   • First 3 pills are always visible; "+N more" reveals ALL remaining ones
-#   • card_id makes modal element IDs unique across comparison-mode cards
-# ---------------------------------------------------------------------------
-MAX_VISIBLE_SOURCES = 3
+def badge_html(jx_key: str, lang: str) -> str:
+    j = JURISDICTIONS[jx_key]
+    return (f'<span class="hd-badge" style="background:{j["color"]}">'
+            f'{j["flag"]} {_html.escape(jx_short(jx_key, lang))}</span>')
+
+
+def _tidy_excerpt(text: str, limit: int = 1800) -> str:
+    lines = [ln.rstrip() for ln in (text or "").strip().splitlines()]
+    out, blank = [], 0
+    for ln in lines:
+        blank = blank + 1 if not ln.strip() else 0
+        if blank <= 1:
+            out.append(ln)
+    tidy = "\n".join(out)
+    return tidy[:limit].rstrip() + ("…" if len(tidy) > limit else "")
+
+
+def text_to_html(text: str, ref_tooltips: dict | None = None) -> str:
+    """
+    Answer text → safe HTML. Markdown is rendered (never shown raw), and
+    [Source N] becomes a footnote superscript with an optional hover tooltip.
+    """
+    def _ref_tag(m) -> str:
+        n = int(m.group(1))
+        tip = (ref_tooltips or {}).get(n, "")
+        title = f' title="{_html.escape(tip)}"' if tip else ""
+        return f'<sup class="fn-ref"{title}>[{n}]</sup>'
+
+    return formatting.to_html(text, cite=_ref_tag)
+
 
 def source_strip_html(indexed_sources: list[tuple[int, dict]], lang: str, card_id: str) -> str:
     """
-    Render a compact numbered reference list that matches [N] superscripts in the answer.
-
-    Design:
-      [1] ● SFDA MDS-G010 AI-ML Medical Devices Guidance 2023 · p.4  ▾
-          "Post-market continuous monitoring of safety, effectiveness..."   ← expands inline
-
-    • No modal — excerpt expands below the row in place
-    • Colored dot = instant jurisdiction identification
-    • Hover on the row toggles the excerpt; ▾/▴ shows state
-    • Works in both dark and light mode via CSS variables
+    Numbered reference list matching the [N] superscripts in the answer.
+    Each entry is a native <details> element: click to read the passage.
     """
     if not indexed_sources:
         return ""
-
-    page_lbl   = T[lang]["page"]
-    title_text = "المصادر" if lang == "ar" else "References"
-    rtl_class  = " rtl" if lang == "ar" else ""
-    parts      = []          # alternating: row-div, excerpt-div
-
+    page_lbl = T[lang]["page"]
+    rtl = " hd-rtl" if lang == "ar" else ""
+    rows = []
     for idx, s in indexed_sources:
-        color    = jx_color(s["jurisdiction"])
-        doc_name = _html.escape(prettify_filename(s["filename"]))
-        exc_id   = f"rref-{card_id}-{idx}"
-
-        # Toggle logic: find the excerpt div by data-exc attribute on the row,
-        # then toggle its 'open' class and flip the arrow — no external function needed.
-        toggle_js = (
-            "var e=document.getElementById(this.dataset.exc);"
-            "var op=e.classList.toggle('open');"
-            "this.querySelector('.ref-toggle').textContent=op?'▴':'▾';"
-        )
-
-        # Show how well this passage actually matched, so a reader can weigh a
-        # borderline citation instead of assuming every reference is equally solid.
+        color = jx_color(s.get("jurisdiction", ""))
+        name = _html.escape(prettify_filename(s.get("filename", "")))
         rel = s.get("relevance")
-        score_html = (
-            f'<span class="ref-score">{round(float(rel) * 100)}%</span>'
-            if isinstance(rel, (int, float)) else ""
+        score = (f'<span class="ref-score">{round(float(rel) * 100)}%</span>'
+                 if isinstance(rel, (int, float)) else "")
+        excerpt = _html.escape(_tidy_excerpt(s.get("text") or ""))
+        rows.append(
+            f'<details class="ref" id="rref-{card_id}-{idx}">'
+            f'<summary><span class="ref-num">[{idx}]</span>'
+            f'<span class="ref-dot" style="background:{color}"></span>'
+            f'<span class="ref-label">{name} · {page_lbl}{s.get("page_number", "")}</span>'
+            f'{score}<span class="ref-toggle"></span></summary>'
+            f'<div class="ref-excerpt" dir="auto" style="border-color:{color}">{excerpt}</div>'
+            f'</details>'
         )
-
-        parts.append(
-            f'<div class="ref-row" data-exc="{exc_id}" onclick="{toggle_js}">'
-            f'  <span class="ref-num">[{idx}]</span>'
-            f'  <span class="ref-dot" style="background:{color}"></span>'
-            f'  <span class="ref-label">{doc_name}&nbsp;·&nbsp;{page_lbl}{s["page_number"]}</span>'
-            f'  {score_html}'
-            f'  <span class="ref-toggle">▾</span>'
-            f'</div>'
-        )
-
-        excerpt = _html.escape((s.get("text") or "").strip())
-        parts.append(
-            f'<div class="ref-excerpt" id="{exc_id}" '
-            f'style="border-left-color:{color}">{excerpt}</div>'
-        )
-
-    return (
-        f'<div class="refs-section{rtl_class}">'
-        f'  <div class="refs-title">{title_text}</div>'
-        f'  {"".join(parts)}'
-        f'</div>'
-    )
+    return (f'<div class="refs-section{rtl}"><div class="refs-title">'
+            f'{T[lang]["references"]}</div>{"".join(rows)}</div>')
 
 
-# ---------------------------------------------------------------------------
-# Helper: colored jurisdiction badge HTML
-# ---------------------------------------------------------------------------
-def badge_html(jx_key: str, lang: str) -> str:
-    j = JURISDICTIONS[jx_key]
-    name = j["en"] if lang == "en" else j["ar"]
-    return (
-        f'<span class="jx-badge" style="background:{j["color"]}">'
-        f'{j["flag"]} {name}</span>'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Helper: jurisdiction display label for selectbox options
-# ---------------------------------------------------------------------------
-def jx_display(jx_key: str, lang: str) -> str:
-    j = JURISDICTIONS[jx_key]
-    name = j["en"] if lang == "en" else j["ar"]
-    return f'{j["flag"]} {name}'
-
-
-# ---------------------------------------------------------------------------
-# Helper: answer text → safe HTML
-#   • Escapes HTML chars
-#   • Converts [Source N] → <sup class="fn-ref" title="…">[N]</sup>
-#     so citations read naturally as footnote superscripts
-#   • ref_tooltips: optional {source_num: "Doc Name · p.X"} for hover text
-# ---------------------------------------------------------------------------
-def text_to_html(text: str, ref_tooltips: dict | None = None) -> str:
-    safe = _html.escape(text)
-
-    def _ref_tag(m: re.Match) -> str:
-        n       = int(m.group(1))
-        tooltip = (ref_tooltips or {}).get(n, "")
-        title   = f' title="{_html.escape(tooltip)}"' if tooltip else ""
-        return f'<sup class="fn-ref"{title}>[{n}]</sup>'
-
-    # Matches clean "[Source 1]" and legacy "[Source 1: file.pdf | p.4]" alike.
-    safe = config.CITATION_RE.sub(_ref_tag, safe)
-
-    # Process line-by-line so mixed blocks (intro sentence + bullets) work correctly.
-    # Consecutive bullet lines → <ul>, numbered lines → <ol>, other lines → <p>.
-    # A transition between types (or an empty line) flushes the current buffer.
-    _BULLET   = re.compile(r'^[*\-–—•]\s+(.*)', re.DOTALL)
-    _NUMBERED = re.compile(r'^\d+[.)]\s+(.*)',  re.DOTALL)
-
-    out:    list[str] = []
-    ul_buf: list[str] = []
-    ol_buf: list[str] = []
-    p_buf:  list[str] = []
-
-    def _flush() -> None:
-        if ul_buf:
-            out.append('<ul>' + ''.join(f'<li>{i}</li>' for i in ul_buf) + '</ul>')
-            ul_buf.clear()
-        if ol_buf:
-            out.append('<ol>' + ''.join(f'<li>{i}</li>' for i in ol_buf) + '</ol>')
-            ol_buf.clear()
-        if p_buf:
-            out.append('<p>' + '<br>'.join(p_buf) + '</p>')
-            p_buf.clear()
-
-    for line in safe.split('\n'):
-        s = line.strip()
-        if not s:
-            _flush()
-            continue
-        bm = _BULLET.match(s)
-        nm = _NUMBERED.match(s)
-        if bm:
-            if p_buf or ol_buf:
-                _flush()
-            ul_buf.append(bm.group(1))
-        elif nm:
-            if p_buf or ul_buf:
-                _flush()
-            ol_buf.append(nm.group(1))
-        else:
-            if ul_buf or ol_buf:
-                _flush()
-            p_buf.append(s)
-
-    _flush()
-    return ''.join(out)
-
-
-def render_question_bubble(question: str, lang: str) -> None:
-    """Render the user's question as a styled bubble above the answer card."""
-    rtl_class = " rtl" if lang == "ar" else ""
-    safe_q = _html.escape(question)
-    st.markdown(
-        f'<div class="chat-q-bubble{rtl_class}">🔍 {safe_q}</div>',
-        unsafe_allow_html=True,
-    )
-
-
-def build_history_context(chat_history: list) -> list[dict] | None:
-    """
-    Extract the last 3 single-mode entries as conversation context for the RAG pipeline.
-    Returns None when there's no usable history.
-    """
-    single = [
-        {"question_en": e["result"].question_en, "answer_en": e["result"].answer_en}
-        for e in chat_history
-        if e["mode"] == "single"
-        and e["result"].question_en
-        and e["result"].answer_en
-    ]
-    return single[-3:] if single else None
-
-
-_COPY_THEME_CSS = {
-    "dark":  {"border": "#2a2f45", "color": "#7a8499", "hover_border": "#4a5568", "hover_color": "#a0aec0"},
-    "light": {"border": "#cdd4ea", "color": "#5868a0", "hover_border": "#9aaad0", "hover_color": "#1c2340"},
-}
-
-
-def _copy_component_html(text: str, label_copy: str, label_copied: str) -> str:
-    c = _COPY_THEME_CSS.get(st.session_state.get("theme", "dark"), _COPY_THEME_CSS["dark"])
-    # json.dumps alone is not enough inside a <script> block: a literal
-    # "</script>" in the answer text would close the tag early.
-    text_js = json.dumps(text).replace("</", "<\\/")
-    copy_js = json.dumps(label_copy)
-    done_js = json.dumps(label_copied)
-    return (
-        '<!DOCTYPE html><html><head><meta charset="utf-8">'
-        '<style>'
-        '* {margin:0;padding:0;box-sizing:border-box}'
-        'body {background:transparent;padding:0}'
-        f'button {{background:transparent;border:1px solid {c["border"]};'
-        f'color:{c["color"]};border-radius:6px;padding:3px 12px;font-size:12px;'
-        f'cursor:pointer;white-space:nowrap;width:100%;height:32px;'
-        f'transition:border-color 0.15s,color 0.15s}}'
-        f'button:hover {{border-color:{c["hover_border"]};color:{c["hover_color"]}}}'
-        '</style></head>'
-        '<body>'
-        '<button id="cb"></button>'
-        '<script>'
-        f'var TEXT={text_js},COPY={copy_js},DONE={done_js};'
-        'var btn=document.getElementById("cb");'
-        'btn.textContent=COPY;'
-        'btn.addEventListener("click",function(){'
-        '  var ta=document.createElement("textarea");'
-        '  ta.value=TEXT;'
-        '  ta.style.cssText="position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";'
-        '  document.body.appendChild(ta);ta.focus();ta.select();'
-        '  try{document.execCommand("copy")}catch(e){}'
-        '  document.body.removeChild(ta);'
-        '  btn.textContent=DONE;'
-        '  setTimeout(function(){btn.textContent=COPY;},1500);'
-        '});'
-        '</script>'
-        '</body></html>'
-    )
-
-
-# ---------------------------------------------------------------------------
-# Helper: render one RAGAnswer as a self-contained styled card
-#   Everything (badge, answer, sources, disclaimer) is one HTML block so
-#   there are no stray Streamlit wrappers breaking the layout.
-# ---------------------------------------------------------------------------
 def select_cited_sources(answer: str, sources: list[dict]) -> list[tuple[int, dict]]:
     """
     Pair each [Source N] cited in `answer` with sources[N-1].
@@ -751,20 +487,78 @@ def select_cited_sources(answer: str, sources: list[dict]) -> list[tuple[int, di
     return indexed
 
 
-def render_answer(result: RAGAnswer, jx_key: str, lang: str) -> None:
-    rtl = 'class="rtl"' if lang == "ar" else ""
+def build_history_context(chat_history: list) -> list[dict] | None:
+    """Last 3 single-mode turns (English text) as context for follow-up questions."""
+    single = [
+        {"question_en": e["result"].question_en, "answer_en": e["result"].answer_en}
+        for e in chat_history
+        if e.get("mode") == "single"
+        and e["result"].question_en
+        and e["result"].answer_en
+    ]
+    return single[-3:] if single else None
 
+
+def _copy_component_html(text: str, label_copy: str, label_copied: str) -> str:
+    # json.dumps alone is not enough inside a <script> block: a literal
+    # "</script>" in the answer text would close the tag early.
+    text_js = json.dumps(text).replace("</", "<\\/")
+    copy_js = json.dumps(label_copy)
+    done_js = json.dumps(label_copied)
+    # Runs in an iframe that cannot see the app theme, so it uses a neutral
+    # grey that reads on both light and dark backgrounds.
+    return (
+        '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+        '*{margin:0;padding:0;box-sizing:border-box}'
+        'body{background:transparent;font-family:"Source Sans Pro",sans-serif}'
+        'button{background:transparent;border:1px solid rgba(128,138,160,.55);'
+        'color:#7d879c;border-radius:8px;font-size:14px;cursor:pointer;width:100%;'
+        'height:38px;transition:border-color .15s,color .15s}'
+        'button:hover{border-color:#3B5BDB;color:#3B5BDB}'
+        '</style></head><body><button id="cb"></button><script>'
+        f'var TEXT={text_js},COPY={copy_js},DONE={done_js};'
+        'var b=document.getElementById("cb");b.textContent=COPY;'
+        'b.addEventListener("click",function(){'
+        'function done(){b.textContent=DONE;setTimeout(function(){b.textContent=COPY;},1500);}'
+        'if(navigator.clipboard){navigator.clipboard.writeText(TEXT).then(done,fallback);}else{fallback();}'
+        'function fallback(){var t=document.createElement("textarea");t.value=TEXT;'
+        't.style.cssText="position:fixed;opacity:0";document.body.appendChild(t);t.select();'
+        'try{document.execCommand("copy")}catch(e){}document.body.removeChild(t);done();}'
+        '});</script></body></html>'
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _pdf_bytes(question, answer, sources, jx_label, question_original) -> bytes:
+    return _export.to_pdf(question=question, answer=answer, sources=sources,
+                          jurisdiction=jx_label, question_original=question_original)
+
+
+@st.cache_data(show_spinner=False, max_entries=64)
+def _docx_bytes(question, answer, sources, jx_label, lang) -> bytes:
+    return _export.to_docx(question=question, answer=answer, sources=sources,
+                           jurisdiction=jx_label, lang=lang)
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+def render_question_bubble(question: str, lang: str) -> None:
+    rtl = " hd-rtl" if lang == "ar" else ""
+    st.markdown(f'<div class="hd-q{rtl}">🔍 {_html.escape(question)}</div>',
+                unsafe_allow_html=True)
+
+
+def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") -> None:
+    card_id = card_id or jx_key
     indexed_cited = select_cited_sources(result.answer, result.sources)
-
-    # Build hover tooltips for the superscripts: [1] → "Doc Name · p.X"
     tooltips = {
         idx: f"{prettify_filename(s['filename'])} · {T[lang]['page']}{s['page_number']}"
         for idx, s in indexed_cited
     }
 
-    # Caution banners: say plainly when the evidence is thin, rather than
-    # presenting a hedged answer with the same confidence as a solid one.
-    rtl_cls = " rtl" if lang == "ar" else ""
+    # Say plainly when the evidence is thin, rather than presenting a hedged
+    # answer with the same confidence as a solid one.
     notices = []
     if not result.no_context:
         if getattr(result, "quality", "ok") == "weak":
@@ -772,83 +566,58 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str) -> None:
         if getattr(result, "coverage", "full") == "partial":
             notices.append(T[lang]["partial_answer"])
     notice_html = "".join(
-        f'<div class="notice{rtl_cls}"><span class="notice-icon">⚠️</span>'
-        f'<span>{_html.escape(n)}</span></div>'
+        f'<div class="notice"><span>⚠️</span><span>{_html.escape(n)}</span></div>'
         for n in notices
     )
 
-    body_html = (
-        f'<p class="no-context">{T[lang]["no_context"]}</p>'
-        if result.no_context
-        else f'{notice_html}<div {rtl}>{text_to_html(result.answer, tooltips)}</div>'
-    )
-
-    strip      = source_strip_html(indexed_cited, lang, card_id=jx_key)
-    disclaimer = f'<div class="disclaimer">⚠️ {_html.escape(T[lang]["disclaimer"])}</div>'
+    dir_attr = ' dir="rtl"' if lang == "ar" else ""
+    if result.no_context:
+        body = f'<p class="no-context">{_html.escape(T[lang]["no_context"])}</p>'
+        meta = ""
+    else:
+        body = f'{notice_html}<div class="hd-body"{dir_attr}>{text_to_html(result.answer, tooltips)}</div>'
+        meta = (f'<span class="hd-meta">'
+                f'{_html.escape(T[lang]["sources_meta"].format(n=len(indexed_cited)))}</span>'
+                if indexed_cited else "")
 
     st.markdown(
-        f'<div class="answer-card">'
-        f'  <div class="card-header">'
-        f'    {badge_html(jx_key, lang)}'
-        f'  </div>'
-        f'  {body_html}'
-        f'  {strip}'
-        f'  {disclaimer}'
-        f'</div>',
+        f'<div class="hd-card"><div class="hd-card-head">{badge_html(jx_key, lang)}{meta}</div>'
+        f'{body}{source_strip_html(indexed_cited, lang, card_id)}'
+        f'<div class="disclaimer">{_html.escape(T[lang]["disclaimer"])}</div></div>',
         unsafe_allow_html=True,
     )
 
-    # ── Copy + Export buttons ──────────────────────────────────────────────
-    copy_html = _copy_component_html(result.answer, T[lang]["copy"], T[lang]["copied"])
+    if result.no_context:
+        return
 
-    if not result.no_context:
-        cited_sources = [s for _, s in indexed_cited]
-        # PDF uses English answer; Word uses the displayed answer (handles Arabic natively)
-        answer_for_pdf  = result.answer_en if result.answer_en else result.answer
-        fname = f"healdar_{jx_key}_{_export._file_date()}"
-
-        pdf_bytes  = _export.to_pdf(
-            question          = result.question_en or result.question,
-            answer            = answer_for_pdf,
-            sources           = cited_sources,
-            jurisdiction      = jx_key,
-            question_original = result.question,
+    plain = formatting.to_plain(config.CITATION_RE.sub(r"[\1]", result.answer))
+    copy_html = _copy_component_html(plain, T[lang]["copy"], T[lang]["copied"])
+    fname = f"healdar_{jx_key}_{_export._file_date()}"
+    label = jx_short(jx_key, "en")
+    sources = tuple(indexed_cited)
+    col_copy, col_pdf, col_word, _ = st.columns([1, 1, 1, 3])
+    with col_copy:
+        _components.html(copy_html, height=42)
+    with col_pdf:
+        st.download_button(
+            T[lang]["export_pdf"],
+            _pdf_bytes(result.question_en or result.question,
+                       result.answer_en or result.answer, sources, label, result.question),
+            file_name=f"{fname}.pdf", mime="application/pdf",
+            width="stretch", key=f"pdf_{card_id}_{id(result)}",
         )
-        docx_bytes = _export.to_docx(
-            question     = result.question,
-            answer       = result.answer,
-            sources      = cited_sources,
-            jurisdiction = jx_key,
-            lang         = lang,
+    with col_word:
+        st.download_button(
+            T[lang]["export_word"],
+            _docx_bytes(result.question, result.answer, sources, label, lang),
+            file_name=f"{fname}.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            width="stretch", key=f"word_{card_id}_{id(result)}",
         )
-
-        col_copy, col_pdf, col_word, *_ = st.columns([1, 1, 1, 3])
-        with col_copy:
-            _components.html(copy_html, height=38)
-        with col_pdf:
-            st.download_button(
-                T[lang]["export_pdf"], pdf_bytes,
-                file_name=f"{fname}.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-                key=f"pdf_{jx_key}_{id(result)}",
-            )
-        with col_word:
-            st.download_button(
-                T[lang]["export_word"], docx_bytes,
-                file_name=f"{fname}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                use_container_width=True,
-                key=f"word_{jx_key}_{id(result)}",
-            )
-    else:
-        col_copy, *_ = st.columns([1, 5])
-        with col_copy:
-            _components.html(copy_html, height=38)
 
 
 # ---------------------------------------------------------------------------
-# Error presentation — map a pipeline failure onto a readable message
+# Errors
 # ---------------------------------------------------------------------------
 def error_message(exc: Exception, lang: str) -> str:
     if isinstance(exc, RateLimitError):
@@ -869,39 +638,37 @@ def show_error(exc: Exception, lang: str) -> None:
 
 
 def render_unavailable(exc: Exception, lang: str) -> None:
-    """Full-page failure card for when the pipeline cannot start at all."""
+    """Failure card for when the pipeline cannot start at all."""
     logger.error("Startup failed: %s: %s", type(exc).__name__, exc, exc_info=True)
-    rtl_s = "direction:rtl;text-align:right;" if lang == "ar" else ""
+    rtl = " hd-rtl" if lang == "ar" else ""
     st.markdown(
-        f'<div class="answer-card" style="{rtl_s}">'
-        f'  <h3 style="margin-top:0;">⚠️ {_html.escape(T[lang]["err_title"])}</h3>'
-        f'  <p>{_html.escape(error_message(exc, lang))}</p>'
-        f'  <p style="font-size:0.78rem;color:var(--text-muted);">'
-        f'    {_html.escape(f"{type(exc).__name__}: {exc}")}</p>'
-        f'</div>',
+        f'<div class="hd-card{rtl}"><h4 style="margin-top:0">⚠️ {_html.escape(T[lang]["err_title"])}</h4>'
+        f'<p>{_html.escape(error_message(exc, lang))}</p>'
+        f'<p class="hd-small">{_html.escape(f"{type(exc).__name__}: {exc}")}</p></div>',
         unsafe_allow_html=True,
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-session throttle
+# ---------------------------------------------------------------------------
 def throttle_exceeded() -> bool:
     """
     Has this session used up its query allowance?
 
     Pure check with no side effect. Streamlit re-runs the whole script on every
-    interaction — a theme toggle, a language switch, a history click — so a
-    check that also *recorded* a query would drain the allowance without any
-    model call ever being made. Recording is record_query()'s job, and it is
-    called only where a request is actually about to be issued.
+    interaction — a language switch, a history click — so a check that also
+    *recorded* a query would drain the allowance without any model call ever
+    being made. Recording is record_query()'s job, and it is called only where
+    a request is actually about to be issued.
 
     Disabled unless HEALDAR_RATE_LIMIT_QUERIES is set.
     """
     if config.RATE_LIMIT_QUERIES <= 0:
         return False
     now = _time.time()
-    recent = [
-        t for t in st.session_state.get("query_times", [])
-        if now - t < config.RATE_LIMIT_WINDOW
-    ]
+    recent = [t for t in st.session_state.get("query_times", [])
+              if now - t < config.RATE_LIMIT_WINDOW]
     st.session_state.query_times = recent
     return len(recent) >= config.RATE_LIMIT_QUERIES
 
@@ -914,37 +681,95 @@ def record_query() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Clear callback — resets the input and all stored results
+# Session statistics — this visitor's own questions only, kept in session_state
 # ---------------------------------------------------------------------------
-def do_clear() -> None:
-    st.session_state.q_input      = ""
-    st.session_state.last_result   = None
-    st.session_state.last_result_l = None
-    st.session_state.last_result_r = None
+def log_session_query(lang: str, mode: str, jurisdictions: list[str], seconds: float,
+                      answered: bool, coverage: str) -> None:
+    st.session_state.session_log.append({
+        "time":          datetime.now().strftime("%H:%M:%S"),
+        "language":      lang,
+        "mode":          mode,
+        "jurisdictions": " + ".join(jurisdictions),
+        "seconds":       round(seconds, 1),
+        "answered":      answered,
+        "coverage":      coverage,
+    })
+
+
+def session_csv(log: list[dict]) -> bytes:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["time", "language", "mode", "jurisdictions",
+                                             "seconds", "answered", "coverage"])
+    writer.writeheader()
+    writer.writerows(log)
+    return buf.getvalue().encode("utf-8-sig")
+
+
+def render_session_panel(lang: str) -> None:
+    log = st.session_state.session_log
+    if not log:
+        st.caption(T[lang]["session_empty"])
+        st.caption(T[lang]["session_note"])
+        return
+
+    n = len(log)
+    avg = sum(r["seconds"] for r in log) / n
+    answered = round(100 * sum(1 for r in log if r["answered"]) / n)
+    compares = sum(1 for r in log if r["mode"] == "compare")
+    stats = [(T[lang]["stat_questions"], n), (T[lang]["stat_avg"], f"{avg:.0f}s"),
+             (T[lang]["stat_answered"], f"{answered}%"), (T[lang]["stat_compare"], compares)]
+    st.markdown(
+        '<div class="hd-stats">' + "".join(
+            f'<div class="hd-stat"><div class="hd-stat-l">{_html.escape(str(k))}</div>'
+            f'<div class="hd-stat-v">{_html.escape(str(v))}</div></div>' for k, v in stats
+        ) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+    def bars(title: str, counts: dict[str, int]) -> str:
+        top = max(counts.values())
+        rows = "".join(
+            f'<div class="hd-bar"><span class="hd-bar-name">{_html.escape(k)}</span>'
+            f'<div class="hd-bar-track"><div class="hd-bar-fill" style="width:{round(100 * v / top)}%"></div></div>'
+            f'<span>{v}</span></div>'
+            for k, v in sorted(counts.items(), key=lambda kv: -kv[1])
+        )
+        return f'<div class="sidebar-label">{_html.escape(title)}</div>{rows}'
+
+    langs: dict[str, int] = {}
+    jxs: dict[str, int] = {}
+    for r in log:
+        name = "English" if r["language"] == "en" else "العربية"
+        langs[name] = langs.get(name, 0) + 1
+        for key in r["jurisdictions"].split(" + "):
+            if key in JURISDICTIONS:
+                label = jx_short(key, lang)
+                jxs[label] = jxs.get(label, 0) + 1
+    st.markdown(bars(T[lang]["stat_lang"], langs) + (bars(T[lang]["stat_jx"], jxs) if jxs else ""),
+                unsafe_allow_html=True)
+    st.download_button(T[lang]["session_dl"], session_csv(log),
+                       file_name=f"healdar_session_{_export._file_date()}.csv",
+                       mime="text/csv", width="stretch", key="session_csv")
+    st.caption(T[lang]["session_note"])
 
 
 # ---------------------------------------------------------------------------
-# Session persistence — survives page refresh (local / Docker with volume).
-# Note: Streamlit Cloud has an ephemeral filesystem, so persistence is
-# limited to the lifetime of the current deployment there.
+# Optional disk persistence of chat history (off by default)
 # ---------------------------------------------------------------------------
 _SESSION_FILE = PROJECT_ROOT / "data" / "runtime" / "last_session.json"
-_MAX_PERSISTED = 15   # keep last N entries
+_MAX_PERSISTED = 15
 
 
 def _serialise_entry(entry: dict) -> dict:
-    """Convert RAGAnswer dataclass instances to plain dicts for JSON."""
     e = dict(entry)
     for key in ("result", "result_l", "result_r"):
         val = e.get(key)
-        # Use is_dataclass so this works even after module reload creates a new class
         if val is not None and dataclasses.is_dataclass(val) and not isinstance(val, type):
             e[key] = dataclasses.asdict(val)
     return e
 
 
 def _deserialise_entry(entry: dict) -> dict:
-    """Reconstruct RAGAnswer objects from plain dicts."""
     e = dict(entry)
     for key in ("result", "result_l", "result_r"):
         if key in e and isinstance(e[key], dict):
@@ -954,562 +779,348 @@ def _deserialise_entry(entry: dict) -> dict:
 
 def save_session(chat_history: list) -> None:
     """
-    Write the last N history entries to disk.
-
-    Off by default. The file is process-wide, not per-visitor, so on any shared
-    deployment enabling this would show one person's questions and answers to
-    the next person who loads the page.
+    Write recent history to disk. Off by default: the file is process-wide, not
+    per-visitor, so on a shared deployment it would show one person's questions
+    and answers to the next person who loads the page.
     """
     if not config.PERSIST_SESSION:
         return
     try:
         payload = [_serialise_entry(e) for e in chat_history[-_MAX_PERSISTED:]]
-        _SESSION_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        _SESSION_FILE.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                                 encoding="utf-8")
     except Exception:
         pass
 
 
 def load_session() -> list:
-    """Read persisted history from disk. Returns empty list on any error."""
     if not config.PERSIST_SESSION:
         return []
     try:
         if not _SESSION_FILE.exists():
             return []
-        raw = json.loads(_SESSION_FILE.read_text(encoding="utf-8"))
-        return [_deserialise_entry(e) for e in raw]
+        return [_deserialise_entry(e)
+                for e in json.loads(_SESSION_FILE.read_text(encoding="utf-8"))]
     except Exception:
         return []
 
 
 # ---------------------------------------------------------------------------
-# Session state initialisation
+# State
 # ---------------------------------------------------------------------------
 def init_state() -> None:
-    # Restore persisted session before applying defaults so history survives refresh
     if "chat_history" not in st.session_state:
         persisted = load_session()
         if persisted:
             st.session_state["chat_history"] = persisted
-            # Re-hydrate the last-result pointers so jurisdiction auto-refresh works
             last = persisted[-1]
             if last.get("mode") == "single":
                 st.session_state["last_result"] = last["result"]
-                st.session_state["used_jx"]     = last.get("jurisdiction")
+                st.session_state["used_jx"] = last.get("jurisdiction")
             elif last.get("mode") == "compare":
                 st.session_state["last_result_l"] = last["result_l"]
                 st.session_state["last_result_r"] = last["result_r"]
-                st.session_state["used_jx_l"]     = last.get("jx_l")
-                st.session_state["used_jx_r"]     = last.get("jx_r")
+                st.session_state["used_jx_l"] = last.get("jx_l")
+                st.session_state["used_jx_r"] = last.get("jx_r")
 
     defaults: dict = {
-        "lang":              "en",
-        "theme":             "dark",
-        "compare":           False,
-        "q_input":           "",
-        "last_jx":           "all",
-        "last_result":       None,
-        "last_jx_l":         "sfda",
-        "last_jx_r":         "eu",
-        "last_result_l":     None,
-        "last_result_r":     None,
-        "used_jx":           None,
-        "used_jx_l":         None,
-        "used_jx_r":         None,
-        "chat_history":      [],
-        "selected_hist_idx": None,
+        "lang": "en", "compare": False, "q_input": "", "auto_submit": False,
+        "last_jx": "all", "last_result": None,
+        "last_jx_l": "sfda", "last_jx_r": "eu",
+        "last_result_l": None, "last_result_r": None,
+        "used_jx": None, "used_jx_l": None, "used_jx_r": None,
+        "chat_history": [], "selected_hist_idx": None, "session_log": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
+def _ask_starter(question: str) -> None:
+    """Starter buttons ask directly instead of only filling the box."""
+    st.session_state.q_input = question
+    st.session_state.auto_submit = True
+
+
+def _clear_history() -> None:
+    for key in ("last_result", "last_result_l", "last_result_r",
+                "used_jx", "used_jx_l", "used_jx_r", "selected_hist_idx"):
+        st.session_state[key] = None
+    st.session_state.chat_history = []
+    save_session([])
+
+
 # ---------------------------------------------------------------------------
-# Main app
+# Sidebar
+# ---------------------------------------------------------------------------
+def render_sidebar(lang: str) -> tuple[str, bool]:
+    with st.sidebar:
+        st.markdown(
+            f'<div class="hd-brand"><span class="hd-brand-name">📡🩺 Healdar</span>'
+            f'<span class="hd-ver">v{config.APP_VERSION}</span></div>'
+            f'<div class="hd-ver-date">{T[lang]["released"]}: {release_date_label(lang)}</div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown(f'<div class="sidebar-label">{T[lang]["lang_label"]}</div>',
+                    unsafe_allow_html=True)
+        pick = st.radio("lang_radio", ["English", "العربية"], index=0 if lang == "en" else 1,
+                        horizontal=True, label_visibility="collapsed")
+        chosen = "en" if pick == "English" else "ar"
+        if chosen != lang:
+            st.session_state.lang = chosen
+            st.rerun()
+
+        st.divider()
+        compare = st.toggle(T[lang]["compare_toggle"], value=st.session_state.compare)
+        st.session_state.compare = compare
+
+        keys = list(JURISDICTIONS)
+        if not compare:
+            st.markdown(f'<div class="sidebar-label">{T[lang]["jx_label"]}</div>',
+                        unsafe_allow_html=True)
+            opts = [jx_display(k, lang) for k in keys]
+            sel = st.selectbox("jx_single", opts, index=keys.index(st.session_state.last_jx),
+                               label_visibility="collapsed")
+            st.session_state.last_jx = keys[opts.index(sel)]
+        else:
+            cmp_keys = [k for k in keys if k != "all"]
+            opts = [jx_display(k, lang) for k in cmp_keys]
+            for side, label, fallback in (("l", "compare_left", 0), ("r", "compare_right", 1)):
+                st.markdown(f'<div class="sidebar-label">{T[lang][label]}</div>',
+                            unsafe_allow_html=True)
+                cur = st.session_state[f"last_jx_{side}"]
+                idx = cmp_keys.index(cur) if cur in cmp_keys else fallback
+                sel = st.selectbox(f"jx_{side}", opts, index=idx, label_visibility="collapsed")
+                st.session_state[f"last_jx_{side}"] = cmp_keys[opts.index(sel)]
+
+        hist = st.session_state.chat_history
+        if hist:
+            st.divider()
+            st.markdown(f'<div class="sidebar-label">{T[lang]["history_label"]}</div>',
+                        unsafe_allow_html=True)
+            sel_idx = st.session_state.selected_hist_idx
+            active = sel_idx if sel_idx is not None else len(hist) - 1
+            for i in range(len(hist) - 1, -1, -1):
+                q = hist[i]["question"]
+                q_short = (q[:46] + "…") if len(q) > 46 else q
+                marker = "● " if i == active else ""
+                if st.button(f"{marker}{q_short}", key=f"hist_btn_{i}", type="tertiary",
+                             width="stretch", help=q):
+                    st.session_state.selected_hist_idx = i
+                    st.rerun()
+            st.button(T[lang]["clear_history"], width="stretch", on_click=_clear_history)
+
+        st.divider()
+        with st.expander(T[lang]["session_title"]):
+            render_session_panel(lang)
+
+        with st.expander(T[lang]["about_title"]):
+            docs, bodies = corpus_stats()
+            rtl = " hd-rtl" if lang == "ar" else ""
+            st.markdown(
+                f'<div class="hd-small{rtl}" style="opacity:.85">{_html.escape(T[lang]["about_body"])}</div>'
+                + (f'<div class="hd-small{rtl}" style="margin-top:.5rem">'
+                   f'{_html.escape(T[lang]["corpus_line"].format(docs=docs, bodies=bodies))}</div>'
+                   if docs else "")
+                + f'<div class="hd-small{rtl}" style="margin-top:.5rem">{_html.escape(T[lang]["theme_hint"])}</div>',
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            f'<div class="hd-foot">'
+            f'<div class="hd-small">{T[lang]["developed_by"]}</div>'
+            f'<div style="font-weight:700">Mohammed R. S. Sunoqrot</div>'
+            f'<a class="hd-li" href="https://www.linkedin.com/in/mohammed-r-s-sunoqrot" '
+            f'target="_blank" rel="noopener noreferrer">in&nbsp; LinkedIn</a>'
+            f'<div class="hd-small" style="margin-top:.6rem">Healdar v{config.APP_VERSION} · '
+            f'{T[lang]["released"]} {release_date_label(lang)}</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    return st.session_state.lang, compare
+
+
+# ---------------------------------------------------------------------------
+# Main
 # ---------------------------------------------------------------------------
 def main() -> None:
-    # Must be first Streamlit call — kept here so the module is importable in tests
     st.set_page_config(
-        page_title="Healdar 📡🩺",
+        page_title="Healdar — Health AI Regulatory Navigator",
         page_icon="📡",
         layout="wide",
         initial_sidebar_state="expanded",
     )
     init_state()
-    inject_css(st.session_state.theme)
-
+    inject_css()
     _analytics.init_db()
-    lang: str = st.session_state.lang
 
-    # A missing API key, a retired model or a corrupt index used to surface as a
-    # raw Python traceback in the browser. Show a readable card instead.
+    lang, compare = render_sidebar(st.session_state.lang)
+
+    # ── Header ───────────────────────────────────────────────────────────
+    docs, bodies = corpus_stats()
+    rtl = " hd-rtl" if lang == "ar" else ""
+    corpus = (f'<div class="hd-corpus">{_html.escape(T[lang]["corpus_line"].format(docs=docs, bodies=bodies))}'
+              f' · v{config.APP_VERSION}</div>' if docs else "")
+    st.markdown(
+        f'<div class="hd-header"><div class="hd-logo">📡🩺</div>'
+        f'<div class="hd-title">Healdar</div>'
+        f'<div class="hd-tagline">{T[lang]["tagline"]}</div>{corpus}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # A missing API key, a retired model or a corrupt index used to surface as
+    # a raw Python traceback. Show a readable card instead.
     try:
-        rag = load_rag(_RAG_VERSION)
+        with st.spinner(T[lang]["loading_index"]):
+            rag = load_rag(_RAG_VERSION)
     except Exception as exc:
         render_unavailable(exc, lang)
         return
 
-    lang = st.session_state.lang
-    theme: str = st.session_state.theme
+    # ── Question ─────────────────────────────────────────────────────────
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid, st.form("question_form", clear_on_submit=False, border=False):
+        c_in, c_btn = st.columns([6, 1], vertical_alignment="bottom")
+        with c_in:
+            st.text_input("question", placeholder=T[lang]["q_placeholder"],
+                          key="q_input", label_visibility="collapsed")
+        with c_btn:
+            submitted = st.form_submit_button(f"🔍 {T[lang]['ask']}", type="primary",
+                                              width="stretch")
 
-    # ── Sidebar ──────────────────────────────────────────────────────────
-    with st.sidebar:
+    if st.session_state.auto_submit:
+        st.session_state.auto_submit = False
+        submitted = True
 
-        # Dark / light mode toggle
-        is_light = st.toggle(
-            T[lang]["light_mode"] if theme == "dark" else T[lang]["dark_mode"],
-            value=(theme == "light"),
-        )
-        new_theme = "light" if is_light else "dark"
-        if new_theme != theme:
-            st.session_state.theme = new_theme
-            st.rerun()
+    q = st.session_state.q_input.strip()
 
-        st.markdown("---")
-
-        # Language toggle
-        st.markdown(f'<div class="sidebar-label">{T[lang]["lang_label"]}</div>', unsafe_allow_html=True)
-        lang_pick = st.radio(
-            "lang_radio",
-            options=["English", "العربية"],
-            index=0 if lang == "en" else 1,
-            horizontal=True,
-            label_visibility="collapsed",
-        )
-        chosen_lang = "en" if lang_pick == "English" else "ar"
-        if chosen_lang != lang:
-            st.session_state.lang = chosen_lang
-            st.rerun()
-        lang = st.session_state.lang
-
-        st.markdown("---")
-
-        # Comparison mode toggle
-        compare = st.toggle(T[lang]["compare_toggle"], value=st.session_state.compare)
-        st.session_state.compare = compare
-
-        st.markdown("---")
-
-        # Jurisdiction selector(s)
-        all_keys = list(JURISDICTIONS.keys())
-        all_opts = [jx_display(k, lang) for k in all_keys]
-
-        if not compare:
-            st.markdown(f'<div class="sidebar-label">{T[lang]["jx_label"]}</div>', unsafe_allow_html=True)
-            cur_idx = all_keys.index(st.session_state.last_jx)
-            sel_opt = st.selectbox("jx_single", all_opts, index=cur_idx, label_visibility="collapsed")
-            st.session_state.last_jx = all_keys[all_opts.index(sel_opt)]
-
-        else:
-            cmp_keys = [k for k in all_keys if k != "all"]
-            cmp_opts = [jx_display(k, lang) for k in cmp_keys]
-
-            st.markdown(f'<div class="sidebar-label">{T[lang]["compare_left"]}</div>', unsafe_allow_html=True)
-            l_idx = cmp_keys.index(st.session_state.last_jx_l) if st.session_state.last_jx_l in cmp_keys else 0
-            sel_l = st.selectbox("jx_left", cmp_opts, index=l_idx, label_visibility="collapsed")
-            st.session_state.last_jx_l = cmp_keys[cmp_opts.index(sel_l)]
-
-            st.markdown(f'<div class="sidebar-label">{T[lang]["compare_right"]}</div>', unsafe_allow_html=True)
-            r_idx = cmp_keys.index(st.session_state.last_jx_r) if st.session_state.last_jx_r in cmp_keys else 1
-            sel_r = st.selectbox("jx_right", cmp_opts, index=r_idx, label_visibility="collapsed")
-            st.session_state.last_jx_r = cmp_keys[cmp_opts.index(sel_r)]
-
-        # ── Chat history ─────────────────────────────────────────────────
-        if st.session_state.chat_history:
-            st.markdown("---")
-            st.markdown(
-                f'<div class="sidebar-label">{T[lang]["history_label"]}</div>',
-                unsafe_allow_html=True,
-            )
-            hist = st.session_state.chat_history
-            sel  = st.session_state.selected_hist_idx
-
-            # Newest first
-            for i, entry in enumerate(reversed(hist)):
-                actual_idx = len(hist) - 1 - i
-                q = entry["question"]
-                q_short = (q[:44] + "…") if len(q) > 44 else q
-                is_active = (sel == actual_idx) or (sel is None and actual_idx == len(hist) - 1)
-                css_class = "hist-item-active" if is_active else "hist-item"
-                st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
-                if st.button(q_short, key=f"hist_btn_{actual_idx}", use_container_width=True):
-                    st.session_state.selected_hist_idx = actual_idx
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
-
-            if st.button(T[lang]["clear_history"], use_container_width=True):
-                st.session_state.chat_history        = []
-                st.session_state.last_result         = None
-                st.session_state.last_result_l       = None
-                st.session_state.last_result_r       = None
-                st.session_state.used_jx             = None
-                st.session_state.used_jx_l           = None
-                st.session_state.used_jx_r           = None
-                st.session_state.selected_hist_idx   = None
-                save_session([])  # wipe persisted file
-                st.rerun()
-
-        # About
-        with st.expander(T[lang]["about_title"]):
-            rtl_style = "direction:rtl;text-align:right;" if lang == "ar" else ""
-            st.markdown(
-                f'<p style="font-size:0.85rem;color:#7a8499;{rtl_style}">'
-                f'{_html.escape(T[lang]["about_body"])}</p>',
-                unsafe_allow_html=True,
-            )
-
-        # ── Analytics panel ───────────────────────────────────────────────
-        with st.expander(T[lang]["analytics_title"]):
-            stats = _analytics.get_summary()
-            if not stats.get("total"):
-                st.caption("No data yet — stats appear after the first query.")
-            else:
-                total   = stats["total"]
-                today   = stats.get("today", 0)
-                avg_ms  = stats.get("avg_response_ms")
-                rtl_s   = "direction:rtl;text-align:right;" if lang == "ar" else ""
-
-                # ── Key numbers ──
-                st.markdown(
-                    f'<div style="display:flex;gap:1rem;flex-wrap:wrap;{rtl_s}">'
-                    f'  <div style="flex:1;min-width:70px;background:var(--bg-card);'
-                    f'       border:1px solid var(--border);border-radius:8px;padding:.5rem .7rem;">'
-                    f'    <div style="font-size:.7rem;color:var(--text-secondary);">Queries</div>'
-                    f'    <div style="font-size:1.3rem;font-weight:700;">{total}</div>'
-                    f'    <div style="font-size:.68rem;color:var(--text-secondary);">'
-                    f'      {today} {T[lang]["analytics_today"]}</div>'
-                    f'  </div>'
-                    + (
-                    f'  <div style="flex:1;min-width:70px;background:var(--bg-card);'
-                    f'       border:1px solid var(--border);border-radius:8px;padding:.5rem .7rem;">'
-                    f'    <div style="font-size:.7rem;color:var(--text-secondary);">Avg time</div>'
-                    f'    <div style="font-size:1.3rem;font-weight:700;">{avg_ms // 1000 if avg_ms and avg_ms >= 1000 else (avg_ms or "—")}{"s" if avg_ms and avg_ms >= 1000 else ("ms" if avg_ms else "")}</div>'
-                    f'  </div>'
-                    if avg_ms else ""
-                    )
-                    + f'  <div style="flex:1;min-width:70px;background:var(--bg-card);'
-                    f'       border:1px solid var(--border);border-radius:8px;padding:.5rem .7rem;">'
-                    f'    <div style="font-size:.7rem;color:var(--text-secondary);">Compare</div>'
-                    f'    <div style="font-size:1.3rem;font-weight:700;">{stats.get("compare_pct", 0)}%</div>'
-                    f'  </div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-                # ── Language split ──
-                langs = stats.get("languages", [])
-                if langs:
-                    st.markdown(
-                        '<div style="font-size:.72rem;color:var(--text-secondary);'
-                        'margin:.6rem 0 .2rem;">Language</div>',
-                        unsafe_allow_html=True,
-                    )
-                    for row in langs:
-                        pct = round(row["n"] / total * 100)
-                        label = "🇬🇧 EN" if row["language"] == "en" else "🇸🇦 AR"
-                        st.markdown(
-                            f'<div style="display:flex;align-items:center;gap:.4rem;'
-                            f'margin-bottom:.25rem;font-size:.78rem;">'
-                            f'  <span style="width:3rem;">{label}</span>'
-                            f'  <div style="flex:1;background:var(--border);border-radius:4px;height:6px;">'
-                            f'    <div style="width:{pct}%;background:#0a66c2;border-radius:4px;height:6px;"></div>'
-                            f'  </div>'
-                            f'  <span style="color:var(--text-secondary);width:2.5rem;text-align:right;">'
-                            f'    {pct}%</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                # ── Top jurisdictions ──
-                top_jx = stats.get("top_jurisdictions", [])
-                if top_jx:
-                    max_n = top_jx[0]["n"]
-                    st.markdown(
-                        '<div style="font-size:.72rem;color:var(--text-secondary);'
-                        'margin:.6rem 0 .2rem;">Top jurisdictions</div>',
-                        unsafe_allow_html=True,
-                    )
-                    for row in top_jx:
-                        pct = round(row["n"] / max_n * 100)
-                        st.markdown(
-                            f'<div style="display:flex;align-items:center;gap:.4rem;'
-                            f'margin-bottom:.25rem;font-size:.75rem;">'
-                            f'  <span style="width:3.5rem;overflow:hidden;text-overflow:ellipsis;'
-                            f'  white-space:nowrap;">{row["jurisdiction"]}</span>'
-                            f'  <div style="flex:1;background:var(--border);border-radius:4px;height:6px;">'
-                            f'    <div style="width:{pct}%;background:#00843d;border-radius:4px;height:6px;"></div>'
-                            f'  </div>'
-                            f'  <span style="color:var(--text-secondary);width:1.5rem;text-align:right;">'
-                            f'    {row["n"]}</span>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-                # ── CSV download ──
-                st.download_button(
-                    T[lang]["analytics_dl"],
-                    data=_analytics.export_csv(),
-                    file_name=f"healdar_analytics_{_export._file_date()}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-
-        # Developer credit — pinned at the bottom of the sidebar
-        st.markdown(
-            """
-            <div style="
-                position: fixed;
-                bottom: 0;
-                left: 0;
-                width: 18rem;
-                padding: 0.75rem 1.1rem;
-                background: var(--sidebar-bg, #161b22);
-                border-top: 1px solid var(--border-color, #30363d);
-                z-index: 100;
-            ">
-                <p style="margin:0 0 0.4rem;font-size:0.72rem;color:#7a8499;line-height:1.4;">
-                    Developed by<br>
-                    <strong style="color:var(--text-primary,#e6edf3);font-size:0.78rem;">
-                        Mohammed R. S. Sunoqrot
-                    </strong>
-                </p>
-                <a href="https://www.linkedin.com/in/mohammed-r-s-sunoqrot"
-                   target="_blank" rel="noopener noreferrer"
-                   style="
-                       display: inline-flex;
-                       align-items: center;
-                       gap: 0.35rem;
-                       padding: 0.28rem 0.7rem;
-                       background: #0a66c2;
-                       color: #fff;
-                       border-radius: 4px;
-                       font-size: 0.72rem;
-                       font-weight: 600;
-                       text-decoration: none;
-                       transition: background 0.2s;
-                   "
-                   onmouseover="this.style.background='#004182'"
-                   onmouseout="this.style.background='#0a66c2'"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"
-                         viewBox="0 0 24 24" fill="white">
-                        <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037
-                                 -1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046
-                                 c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286z
-                                 M5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1
-                                 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452z
-                                 M22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24
-                                 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2
-                                 0 22.222 0h.003z"/>
-                    </svg>
-                    LinkedIn
-                </a>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    # ── Header ───────────────────────────────────────────────────────────
-    rtl_header = "direction:rtl;" if lang == "ar" else ""
-    st.markdown(
-        f"""
-        <div class="rr-header" style="{rtl_header}">
-            <div class="rr-emoji">📡🩺</div>
-            <div class="rr-title">Healdar</div>
-            <div class="rr-tagline">{T[lang]["tagline"]}</div>
-        </div>
-        <hr class="rr-divider">
-        """,
-        unsafe_allow_html=True,
-    )
-
-    # ── Question input — Enter submits, buttons hidden via CSS ───────────
-    with st.form("question_form", clear_on_submit=False):
-        question: str = st.text_input(
-            label="question",
-            placeholder=T[lang]["q_placeholder"],
-            key="q_input",
-            label_visibility="collapsed",
-        )
-        # Hidden submit button — required by st.form but invisible (CSS display:none)
-        submitted = st.form_submit_button(label="go")
-
-    # Empty submission clears the last answer
-    if submitted and not question.strip():
-        st.session_state.last_result   = None
-        st.session_state.last_result_l = None
-        st.session_state.last_result_r = None
-
-    # ── Execute RAG on submit ─────────────────────────────────────────────
-    q = st.session_state.q_input.strip()   # current text in the input box
-
+    # ── Run a query ──────────────────────────────────────────────────────
     if submitted and q and throttle_exceeded():
         st.warning(T[lang]["throttled"])
     elif submitted and q:
         record_query()
         try:
+            hist_ctx = build_history_context(st.session_state.chat_history)
             if not compare:
-                jx       = st.session_state.last_jx
-                hist_ctx = build_history_context(st.session_state.chat_history)
+                jx = st.session_state.last_jx
                 with st.spinner(T[lang]["loading"]):
-                    _t0 = _time.perf_counter()
+                    t0 = _time.perf_counter()
                     result = rag.ask(q, jurisdiction=jx, history=hist_ctx)
-                    _ms = int((_time.perf_counter() - _t0) * 1000)
+                    secs = _time.perf_counter() - t0
                 _analytics.log_query(q, lang, "single", jurisdiction=jx,
-                                     response_ms=_ms, no_context=result.no_context)
+                                     response_ms=int(secs * 1000), no_context=result.no_context)
+                log_session_query(lang, "single", [jx], secs, not result.no_context,
+                                  result.coverage)
                 st.session_state.last_result = result
-                st.session_state.used_jx     = jx
-                st.session_state.chat_history.append({
-                    "question": q, "mode": "single", "lang": lang,
-                    "jurisdiction": jx, "result": result,
-                })
-                st.session_state.selected_hist_idx = None
-                save_session(st.session_state.chat_history)
-
+                st.session_state.used_jx = jx
+                st.session_state.chat_history.append(
+                    {"question": q, "mode": "single", "lang": lang,
+                     "jurisdiction": jx, "result": result})
             else:
-                jx_l = st.session_state.last_jx_l
-                jx_r = st.session_state.last_jx_r
-                hist_ctx = build_history_context(st.session_state.chat_history)
+                jx_l, jx_r = st.session_state.last_jx_l, st.session_state.last_jx_r
                 with st.spinner(T[lang]["loading"]):
-                    _t0 = _time.perf_counter()
-                    # Run both jurisdictions concurrently — sequentially this was
-                    # two full pipelines (up to eight Groq calls in Arabic) behind
-                    # a single spinner.
-                    res_l, res_r = rag.ask_many(
-                        [(q, jx_l), (q, jx_r)], history=hist_ctx
-                    )
-                    _ms = int((_time.perf_counter() - _t0) * 1000)
+                    t0 = _time.perf_counter()
+                    # Both sides run concurrently — sequentially this was up to
+                    # eight Groq calls behind one spinner in Arabic.
+                    res_l, res_r = rag.ask_many([(q, jx_l), (q, jx_r)], history=hist_ctx)
+                    secs = _time.perf_counter() - t0
                 _analytics.log_query(q, lang, "compare", jx_left=jx_l, jx_right=jx_r,
-                                     response_ms=_ms, no_context=res_l.no_context and res_r.no_context)
-                st.session_state.last_result_l = res_l
-                st.session_state.last_result_r = res_r
-                st.session_state.used_jx_l     = jx_l
-                st.session_state.used_jx_r     = jx_r
-                st.session_state.chat_history.append({
-                    "question": q, "mode": "compare", "lang": lang,
-                    "jx_l": jx_l, "jx_r": jx_r,
-                    "result_l": res_l, "result_r": res_r,
-                })
-                st.session_state.selected_hist_idx = None
-                save_session(st.session_state.chat_history)
-
+                                     response_ms=int(secs * 1000),
+                                     no_context=res_l.no_context and res_r.no_context)
+                log_session_query(lang, "compare", [jx_l, jx_r], secs,
+                                  not (res_l.no_context and res_r.no_context),
+                                  "partial" if "partial" in (res_l.coverage, res_r.coverage) else "full")
+                st.session_state.last_result_l, st.session_state.last_result_r = res_l, res_r
+                st.session_state.used_jx_l, st.session_state.used_jx_r = jx_l, jx_r
+                st.session_state.chat_history.append(
+                    {"question": q, "mode": "compare", "lang": lang,
+                     "jx_l": jx_l, "jx_r": jx_r, "result_l": res_l, "result_r": res_r})
+            st.session_state.selected_hist_idx = None
+            save_session(st.session_state.chat_history)
+            st.rerun()   # refresh the sidebar history and session stats
         except HealdarError as exc:
             show_error(exc, lang)
 
-    # ── Auto-refresh when jurisdiction changes (updates last history entry in-place) ──
-    # This re-queries the model, so it counts against the throttle too — changing
-    # the jurisdiction selector repeatedly is otherwise a free way to spend quota.
+    # ── Re-ask the current question when the jurisdiction changes ────────
+    # This re-queries the model, so it counts against the throttle too.
     elif q and not submitted and not throttle_exceeded():
-      try:
-        if not compare and st.session_state.last_result is not None:
-            jx = st.session_state.last_jx
-            if jx != st.session_state.used_jx:
-                record_query()
-                hist_ctx = build_history_context(st.session_state.chat_history[:-1])
-                with st.spinner(T[lang]["loading"]):
-                    _t0 = _time.perf_counter()
-                    result = rag.ask(q, jurisdiction=jx, history=hist_ctx)
-                    _ms = int((_time.perf_counter() - _t0) * 1000)
-                _analytics.log_query(q, lang, "single", jurisdiction=jx,
-                                     response_ms=_ms, no_context=result.no_context)
-                st.session_state.last_result = result
-                st.session_state.used_jx     = jx
-                if st.session_state.chat_history:
-                    st.session_state.chat_history[-1]["result"]       = result
-                    st.session_state.chat_history[-1]["jurisdiction"] = jx
-
-        elif compare:
-            jx_l      = st.session_state.last_jx_l
-            jx_r      = st.session_state.last_jx_r
-            changed_l = (st.session_state.last_result_l is not None and
-                         jx_l != st.session_state.used_jx_l)
-            changed_r = (st.session_state.last_result_r is not None and
-                         jx_r != st.session_state.used_jx_r)
-            if changed_l or changed_r:
-                record_query()
-                pending = []
-                if changed_l:
-                    pending.append((q, jx_l))
-                if changed_r:
-                    pending.append((q, jx_r))
-                with st.spinner(T[lang]["loading"]):
-                    _t0 = _time.perf_counter()
-                    answers = rag.ask_many(pending)
-                    _ms = int((_time.perf_counter() - _t0) * 1000)
-                if changed_l:
-                    res_l = answers.pop(0)
-                    st.session_state.last_result_l = res_l
-                    st.session_state.used_jx_l     = jx_l
-                if changed_r:
-                    res_r = answers.pop(0)
-                    st.session_state.last_result_r = res_r
-                    st.session_state.used_jx_r     = jx_r
-                _analytics.log_query(q, lang, "compare", jx_left=jx_l, jx_right=jx_r, response_ms=_ms)
-                if st.session_state.chat_history:
-                    last = st.session_state.chat_history[-1]
+        try:
+            if not compare and st.session_state.last_result is not None:
+                jx = st.session_state.last_jx
+                if jx != st.session_state.used_jx:
+                    record_query()
+                    hist_ctx = build_history_context(st.session_state.chat_history[:-1])
+                    with st.spinner(T[lang]["loading"]):
+                        t0 = _time.perf_counter()
+                        result = rag.ask(q, jurisdiction=jx, history=hist_ctx)
+                        secs = _time.perf_counter() - t0
+                    log_session_query(lang, "single", [jx], secs, not result.no_context,
+                                      result.coverage)
+                    st.session_state.last_result = result
+                    st.session_state.used_jx = jx
+                    if st.session_state.chat_history:
+                        st.session_state.chat_history[-1]["result"] = result
+                        st.session_state.chat_history[-1]["jurisdiction"] = jx
+            elif compare:
+                jx_l, jx_r = st.session_state.last_jx_l, st.session_state.last_jx_r
+                changed_l = (st.session_state.last_result_l is not None
+                             and jx_l != st.session_state.used_jx_l)
+                changed_r = (st.session_state.last_result_r is not None
+                             and jx_r != st.session_state.used_jx_r)
+                if changed_l or changed_r:
+                    record_query()
+                    pending = [(q, j) for j, c in ((jx_l, changed_l), (jx_r, changed_r)) if c]
+                    with st.spinner(T[lang]["loading"]):
+                        t0 = _time.perf_counter()
+                        answers = rag.ask_many(pending)
+                        secs = _time.perf_counter() - t0
+                    log_session_query(lang, "compare", [jx_l, jx_r], secs, True, "full")
+                    last = st.session_state.chat_history[-1] if st.session_state.chat_history else None
                     if changed_l:
-                        last["result_l"] = res_l
-                        last["jx_l"] = jx_l
+                        st.session_state.last_result_l = answers.pop(0)
+                        st.session_state.used_jx_l = jx_l
+                        if last:
+                            last["result_l"], last["jx_l"] = st.session_state.last_result_l, jx_l
                     if changed_r:
-                        last["result_r"] = res_r
-                        last["jx_r"] = jx_r
-      except HealdarError as exc:
-          show_error(exc, lang)
+                        st.session_state.last_result_r = answers.pop(0)
+                        st.session_state.used_jx_r = jx_r
+                        if last:
+                            last["result_r"], last["jx_r"] = st.session_state.last_result_r, jx_r
+        except HealdarError as exc:
+            show_error(exc, lang)
 
-    # ── Empty state — starter questions ──────────────────────────────────
+    # ── Empty state ──────────────────────────────────────────────────────
     hist = st.session_state.chat_history
     if not hist:
-        starters = {
-            "en": [
-                "What are the post-market surveillance requirements for AI medical devices?",
-                "How does SFDA regulate AI-based Software as a Medical Device (SaMD)?",
-                "What does the EU AI Act require for high-risk medical AI systems?",
-                "How do Qatar and UAE differ in their health AI regulatory frameworks?",
-                "What are the FDA's guidelines for AI/ML-based software in medical devices?",
-            ],
-            "ar": [
-                "ما هي متطلبات مراقبة ما بعد التسويق لأجهزة الذكاء الاصطناعي الطبية؟",
-                "كيف تنظّم هيئة الغذاء والدواء السعودية البرمجيات الطبية القائمة على الذكاء الاصطناعي؟",
-                "ما متطلبات قانون الاتحاد الأوروبي للذكاء الاصطناعي للأنظمة الطبية عالية المخاطر؟",
-                "كيف تختلف أُطر تنظيم الذكاء الاصطناعي الصحي بين قطر والإمارات؟",
-                "ما إرشادات إدارة الغذاء والدواء الأمريكية للبرمجيات الطبية القائمة على الذكاء الاصطناعي؟",
-            ],
-        }
-        rtl_s = "direction:rtl;text-align:right;" if lang == "ar" else ""
-        _, center, _ = st.columns([1, 4, 1])
-        with center:
-            st.markdown(
-                f'<p style="font-size:0.82rem;color:var(--text-secondary);'
-                f'margin:2rem 0 0.6rem;{rtl_s}">{T[lang]["starter_prompt"]}</p>',
-                unsafe_allow_html=True,
-            )
-            for s in starters[lang]:
-                st.button(
-                    s,
-                    use_container_width=True,
-                    key=f"starter_{s[:20]}",
-                    on_click=lambda v=s: st.session_state.__setitem__("q_input", v),
-                )
+        _, mid, _ = st.columns([1, 8, 1])
+        with mid:
+            st.markdown(f'<div class="sidebar-label{rtl}" style="margin-top:1.2rem">'
+                        f'{T[lang]["starter_prompt"]}</div>', unsafe_allow_html=True)
+            cols = st.columns(2)
+            for i, s in enumerate(STARTERS[lang]):
+                with cols[i % 2]:
+                    st.button(s, key=f"starter_{lang}_{i}", width="stretch",
+                              on_click=_ask_starter, args=(s,))
+        return
 
-    # ── Display selected or latest history entry ──────────────────────────
-    if hist:
-        sel_idx = st.session_state.selected_hist_idx
-        entry   = hist[sel_idx] if (sel_idx is not None and 0 <= sel_idx < len(hist)) else hist[-1]
+    # ── Selected (or latest) conversation entry ──────────────────────────
+    sel = st.session_state.selected_hist_idx
+    entry = hist[sel] if (sel is not None and 0 <= sel < len(hist)) else hist[-1]
+    entry_lang = entry.get("lang", lang)
 
-        render_question_bubble(entry["question"], entry["lang"])
-
-        if entry["mode"] == "single":
-            _, center, _ = st.columns([1, 4, 1])
-            with center:
-                render_answer(entry["result"], entry["jurisdiction"], entry["lang"])
-        else:
-            col_l, col_r = st.columns(2, gap="large")
-            with col_l:
-                render_answer(entry["result_l"], entry["jx_l"], entry["lang"])
-            with col_r:
-                render_answer(entry["result_r"], entry["jx_r"], entry["lang"])
+    if entry.get("mode") == "single":
+        _, mid, _ = st.columns([1, 8, 1])
+        with mid:
+            render_question_bubble(entry["question"], entry_lang)
+            render_answer(entry["result"], entry["jurisdiction"], entry_lang, card_id="single")
+    else:
+        render_question_bubble(entry["question"], entry_lang)
+        col_l, col_r = st.columns(2, gap="large")
+        with col_l:
+            render_answer(entry["result_l"], entry["jx_l"], entry_lang, card_id="left")
+        with col_r:
+            render_answer(entry["result_r"], entry["jx_r"], entry_lang, card_id="right")
 
 
 if __name__ == "__main__":

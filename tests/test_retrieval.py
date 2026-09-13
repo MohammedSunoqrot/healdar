@@ -201,3 +201,29 @@ class TestPassage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGroupBalancing(unittest.TestCase):
+    """Balancing caps a jurisdiction, not each regulator folder inside it."""
+
+    def test_country_split_across_folders_shares_one_quota(self):
+        # Three Saudi folders: without grouping each would get its own quota
+        # and Saudi Arabia would take every slot.
+        pool = [_passage(jx=j, page=i, distance=0.10 + i / 100)
+                for i, j in enumerate(["KSA_SFDA", "KSA_SDAIA", "KSA_NHIC",
+                                       "KSA_SFDA", "KSA_SDAIA", "KSA_NHIC"])]
+        pool += [_passage(jx="USA_FDA", page=1, distance=0.45)]
+        groups = {"KSA_SFDA": "sfda", "KSA_SDAIA": "sfda", "KSA_NHIC": "sfda",
+                  "USA_FDA": "fda"}
+        r = Retriever(StubCollection(pool), hybrid=False, group_of=groups)
+        res = r.search("anything", [], top_k=3, balance=True)
+        seen = [groups[p.jurisdiction] for p in res.passages]
+        self.assertLessEqual(seen.count("sfda"), config.MAX_PER_JURISDICTION)
+        self.assertIn("fda", seen)
+
+    def test_ungrouped_tags_are_their_own_group(self):
+        pool = [_passage(jx="A", page=i, distance=0.1) for i in range(4)]
+        pool += [_passage(jx="B", page=1, distance=0.3)]
+        r = Retriever(StubCollection(pool), hybrid=False)
+        res = r.search("anything", [], top_k=3, balance=True)
+        self.assertIn("B", [p.jurisdiction for p in res.passages])

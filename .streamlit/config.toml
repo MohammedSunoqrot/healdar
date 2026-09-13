@@ -1,10 +1,53 @@
+# Healdar — Streamlit configuration
+#
+# Theming: both a light and a dark palette are defined, so Streamlit's own
+# widgets (buttons, inputs, selects, the header bar) are drawn in the right
+# colours for each. The app follows the visitor's system setting by default;
+# it can be switched from the ⋮ menu → Settings. Healdar's custom components
+# (answer cards, references, notices) derive their colours from the inherited
+# text colour, so they follow whichever theme is active without any Python-side
+# theme tracking.
+#
+# (Earlier versions forced base = "dark" and repainted a "light mode" with CSS
+# overrides. Streamlit's widgets never received those colours, which is why
+# light mode showed black buttons, a black header bar and unreadable labels.)
+
 [theme]
-base = "dark"
-backgroundColor      = "#0e1117"
-secondaryBackgroundColor = "#161b27"
-textColor            = "#e0e4ef"
-primaryColor         = "#3b5bdb"
-font                 = "sans serif"
+font = "sans serif"
+baseRadius = "medium"
+buttonRadius = "medium"
+showSidebarBorder = true
+
+[theme.light]
+primaryColor = "#3B5BDB"
+backgroundColor = "#F7F8FC"
+secondaryBackgroundColor = "#EDF0F7"
+textColor = "#1B2437"
+linkColor = "#3B5BDB"
+borderColor = "#D6DCE8"
+
+[theme.light.sidebar]
+backgroundColor = "#EFF2F8"
+secondaryBackgroundColor = "#FFFFFF"
+
+[theme.dark]
+primaryColor = "#7B93FF"
+backgroundColor = "#0E1117"
+secondaryBackgroundColor = "#1A2030"
+textColor = "#E3E7F0"
+linkColor = "#8FA4FF"
+borderColor = "#2A3145"
+
+[theme.dark.sidebar]
+backgroundColor = "#131826"
+secondaryBackgroundColor = "#1A2030"
+
+[client]
+# Hide developer-only toolbar entries (e.g. "Deploy") from visitors.
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
 
 [server]
 headless = true

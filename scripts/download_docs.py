@@ -55,6 +55,9 @@ class Doc:
     referer: str = ""
     fallback_url: str = ""
     note: str = ""
+    # Supplied by hand (no reliable automated source). Verified if present,
+    # never re-downloaded; reported -- not failed -- when missing.
+    manual: bool = False
 
     @property
     def path(self) -> Path:
@@ -104,30 +107,30 @@ DOCS: list[Doc] = [
     # SAUDI ARABIA — SFDA (medical device regulator)
     # ══════════════════════════════════════════════════════════════════════
     Doc("https://www.sfda.gov.sa/sites/default/files/2023-01/MDS-G010ML.pdf",
-        "SFDA/SFDA_MDS-G010_AI-ML_Medical_Devices_Guidance_2023.pdf",
+        "KSA_SFDA/SFDA_MDS-G010_AI-ML_Medical_Devices_Guidance_2023.pdf",
         "SFDA MDS-G010 — AI/ML Medical Devices Guidance", "MDS-G-010"),
     Doc("https://www.sfda.gov.sa/sites/default/files/2020-03/MDS_G23.pdf",
-        "SFDA/SFDA_MDS-G023_SaMD_Guidance_2018.pdf",
+        "KSA_SFDA/SFDA_MDS-G023_SaMD_Guidance_2018.pdf",
         "SFDA MDS-G023 — Software as a Medical Device Guidance", "MDS"),
     Doc("https://www.sfda.gov.sa/sites/default/files/2025-03/MDS-G025.pdf",
-        "SFDA/SFDA_MDS-G025_General_Wellness_Devices_2025.pdf",
+        "KSA_SFDA/SFDA_MDS-G025_General_Wellness_Devices_2025.pdf",
         "SFDA MDS-G025 — General Wellness Devices Guidance",
         "General Wellness",
         note="Named 'AI Guidance' in earlier versions of this script; it is not."),
     Doc("https://www.sfda.gov.sa/sites/default/files/2025-08/MDS-G027.pdf",
-        "SFDA/SFDA_MDS-G027_Digital_Health_Products_2025.pdf",
+        "KSA_SFDA/SFDA_MDS-G027_Digital_Health_Products_2025.pdf",
         "SFDA MDS-G027 — Digital Health Products Guidance", "MDS-G-027"),
     Doc("https://www.sfda.gov.sa/sites/default/files/2025-03/MDS-G024.pdf",
-        "SFDA/SFDA_MDS-G024_ISO13485_Requirements_2025.pdf",
+        "KSA_SFDA/SFDA_MDS-G024_ISO13485_Requirements_2025.pdf",
         "SFDA MDS-G024 — ISO 13485 / SFDA-MDS requirement mapping", "13485"),
     Doc("https://www.sfda.gov.sa/sites/default/files/2019-10/MDS-G38.pdf",
-        "SFDA/SFDA_MDS-G038_PreMarket_Cybersecurity_2019.pdf",
+        "KSA_SFDA/SFDA_MDS-G038_PreMarket_Cybersecurity_2019.pdf",
         "SFDA MDS-G38 — Pre-Market Cybersecurity of Medical Devices", "Cybersecurity"),
     Doc("https://www.sfda.gov.sa/sites/default/files/2019-10/MDS-G37.pdf",
-        "SFDA/SFDA_MDS-G037_PostMarket_Cybersecurity_2019.pdf",
+        "KSA_SFDA/SFDA_MDS-G037_PostMarket_Cybersecurity_2019.pdf",
         "SFDA MDS-G37 — Post-Market Cybersecurity of Medical Devices", "Cybersecurity"),
     Doc("https://www.sfda.gov.sa/sites/default/files/2019-10/MDS-G36.pdf",
-        "SFDA/SFDA_MDS-G036_Cybersecurity_Healthcare_Providers_2019.pdf",
+        "KSA_SFDA/SFDA_MDS-G036_Cybersecurity_Healthcare_Providers_2019.pdf",
         "SFDA MDS-G36 — Medical Device Cybersecurity for Healthcare Providers",
         "Cybersecurity"),
 
@@ -145,7 +148,7 @@ DOCS: list[Doc] = [
     # UAE
     # ══════════════════════════════════════════════════════════════════════
     Doc("https://ai.gov.ae/wp-content/uploads/resources/UAE_National_Strategy_for_Artificial_Intelligence_2031.pdf",
-        "UAE_National/UAE_National_AI_Strategy_2031.pdf",
+        "UAE_Federal/UAE_National_AI_Strategy_2031.pdf",
         "UAE — National AI Strategy 2031", "Artificial Intelligence",
         fallback_url="https://ai.gov.ae/wp-content/uploads/2021/07/UAE-National-Strategy-for-Artificial-Intelligence-2031.pdf"),
     Doc("https://www.doh.gov.ae/-/media/Feature/Resources/Standards/2025/Responsible-AI-Standard-V1.ashx",
@@ -208,44 +211,44 @@ DOCS: list[Doc] = [
     # EUROPEAN UNION
     # ══════════════════════════════════════════════════════════════════════
     Doc("https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:02017R0745-20260101",
-        "EU_MDR_MDCG/EU_MDR_2017-745_Consolidated_2026.pdf",
+        "EU_Legislation/EU_MDR_2017-745_Consolidated_2026.pdf",
         "EU MDR — Regulation (EU) 2017/745 consolidated (in force 2026-01-01)",
         "2017/745"),
     Doc("https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=CELEX:02017R0746-20250110",
-        "EU_MDR_MDCG/EU_IVDR_2017-746_Consolidated_2025.pdf",
+        "EU_Legislation/EU_IVDR_2017-746_Consolidated_2025.pdf",
         "EU IVDR — Regulation (EU) 2017/746 consolidated (2025-01-10)", "2017/746"),
     Doc("https://eur-lex.europa.eu/legal-content/EN/TXT/PDF/?uri=OJ:L_202401689",
-        "EU_MDR_MDCG/EU_AI_Act_2024-1689.pdf",
+        "EU_Legislation/EU_AI_Act_2024-1689.pdf",
         "EU AI Act — Regulation (EU) 2024/1689", "2024/1689"),
     Doc("https://health.ec.europa.eu/document/download/b45335c5-1679-4c71-a91c-fc7a4d37f12b_en?filename=md_mdcg_2019_11_guidance_qualification_classification_software_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2019-11_Software_Qualification_Classification.pdf",
+        "EU_MDCG/EU_MDCG_2019-11_Software_Qualification_Classification.pdf",
         "MDCG 2019-11 Rev.1 — Software Qualification & Classification", "MDCG 2019-11"),
     Doc("https://health.ec.europa.eu/system/files/2020-09/md_mdcg_2020_1_guidance_clinic_eva_md_software_en_0.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2020-1_Clinical_Evaluation_MDSW.pdf",
+        "EU_MDCG/EU_MDCG_2020-1_Clinical_Evaluation_MDSW.pdf",
         "MDCG 2020-1 — Clinical Evaluation of Medical Device Software", "MDCG 2020-1"),
     Doc("https://health.ec.europa.eu/system/files/2023-12/mdcg_2023-5_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2023-5_Qualification_Classification_Software.pdf",
+        "EU_MDCG/EU_MDCG_2023-5_Qualification_Classification_Software.pdf",
         "MDCG 2023-5 — Qualification & Classification of Software", "MDCG 2023-5"),
     Doc("https://health.ec.europa.eu/document/download/b2c4e715-f2b4-4d24-af60-056b5d41a72e_en?filename=md_mdcg_2023-4_software_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2023-4_MDSW_Hardware_Combinations_2023.pdf",
+        "EU_MDCG/EU_MDCG_2023-4_MDSW_Hardware_Combinations_2023.pdf",
         "MDCG 2023-4 — MDSW Hardware Combinations", "MDCG 2023-4"),
     Doc("https://health.ec.europa.eu/document/download/ec9b0f40-7f82-43a7-b833-ebd45b772eae_en?filename=mdcg_2025-4_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2025-4_MDSW_Online_Platforms_2025.pdf",
+        "EU_MDCG/EU_MDCG_2025-4_MDSW_Online_Platforms_2025.pdf",
         "MDCG 2025-4 — MDSW apps on online platforms", "MDCG 2025-4"),
     Doc("https://health.ec.europa.eu/document/download/b78a17d7-e3cd-4943-851d-e02a2f22bbb4_en?filename=mdcg_2025-6_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2025-6_FAQ_MDR_IVDR_AI_Act.pdf",
+        "EU_MDCG/EU_MDCG_2025-6_FAQ_MDR_IVDR_AI_Act.pdf",
         "MDCG 2025-6 — FAQ on MDR/IVDR & AI Act interplay", "MDCG 2025-6"),
     Doc("https://health.ec.europa.eu/document/download/a9ad86b7-1b8e-4bae-beb4-48b2b3ed2f05_en?filename=mdcg_2025-10_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2025-10_Post_Market_Surveillance_2025.pdf",
+        "EU_MDCG/EU_MDCG_2025-10_Post_Market_Surveillance_2025.pdf",
         "MDCG 2025-10 — Post-market surveillance of devices and IVDs", "MDCG 2025-10"),
     Doc("https://health.ec.europa.eu/document/download/b23b362f-8a56-434c-922a-5b3ca4d0a7a1_en?filename=md_cybersecurity_en.pdf",
-        "EU_MDR_MDCG/EU_MDCG_2019-16_Cybersecurity_Medical_Devices.pdf",
+        "EU_MDCG/EU_MDCG_2019-16_Cybersecurity_Medical_Devices.pdf",
         "MDCG 2019-16 Rev.1 — Cybersecurity for medical devices", "Cybersecurity"),
     Doc("https://ec.europa.eu/newsroom/dae/redirection/document/118119",
-        "EU_MDR_MDCG/EU_GPAI_Code_of_Practice_Safety_Security_2025.pdf",
+        "EU_AI_Office/EU_GPAI_Code_of_Practice_Safety_Security_2025.pdf",
         "GPAI Code of Practice — Safety and Security chapter (2025)", "General-Purpose"),
     Doc("https://ec.europa.eu/newsroom/dae/redirection/document/118120",
-        "EU_MDR_MDCG/EU_GPAI_Code_of_Practice_Transparency_2025.pdf",
+        "EU_AI_Office/EU_GPAI_Code_of_Practice_Transparency_2025.pdf",
         "GPAI Code of Practice — Transparency chapter (2025)", "Transparency"),
 
     # ══════════════════════════════════════════════════════════════════════
@@ -287,42 +290,43 @@ DOCS: list[Doc] = [
     # INTERNATIONAL
     # ══════════════════════════════════════════════════════════════════════
     Doc("https://iris.who.int/server/api/core/bitstreams/e9e62c65-6045-481e-bd04-20e206bc5039/content",
-        "International/INT_WHO_Ethics_Governance_AI_Health_LMM_2024.pdf",
+        "INT_WHO/INT_WHO_Ethics_Governance_AI_Health_LMM_2024.pdf",
         "WHO — Ethics & governance of AI for health: large multi-modal models (2024)",
         "health"),
+    Doc("https://www.imdrf.org/sites/default/files/2025-01/IMDRF_SaMD%20WG_Software-Specific%20Risk_N81%20Final_0.pdf",
+        "INT_IMDRF/INT_IMDRF_N81_Software_Specific_Risk_Characterization_2025.pdf",
+        "IMDRF N81 (Final, 2025) -- Characterization of medical device software and software-specific risk",
+        "N81", manual=True,
+        note="imdrf.org was unreachable from the build network; file supplied manually."),
+    Doc("https://www.imdrf.org/sites/default/files/2025-02/IMDRF_AIML%20WG_GMLP_N88%20Final.pdf",
+        "INT_IMDRF/INT_IMDRF_N88_Good_Machine_Learning_Practice_2025.pdf",
+        "IMDRF N88 (Final, 2025) -- Good machine learning practice: guiding principles",
+        "N88", manual=True,
+        note="imdrf.org was unreachable from the build network; file supplied manually."),
+
+    # ══════════════════════════════════════════════════════════════════════
+    # LEGISLATION supplied manually
+    # ══════════════════════════════════════════════════════════════════════
+    Doc("https://www.almeezan.qa/LawPage.aspx?id=3948&language=en",
+        "Qatar_Legislation/Qatar_Law_13_2016_Personal_Data_Privacy.pdf",
+        "Qatar -- Law No. 13 of 2016 on Protecting Personal Data Privacy (Official Gazette translation)",
+        "Law No. (13) of 2016", manual=True,
+        note="almeezan.qa serves a broken TLS chain; do not disable verification to fetch law text."),
+    Doc("https://www.dji.gov.ae",
+        "UAE_Federal/UAE_Federal_PDPL_Decree_Law_45_2021_AR.pdf",
+        "UAE -- Federal Decree-Law No. 45 of 2021 on Personal Data Protection (official Arabic text)",
+        "2021", manual=True,
+        note="Official text is Arabic only; ingest selects the pypdf extractor for it."),
 ]
 
 # Documents that genuinely could not be automated. Kept visible rather than
 # quietly dropped, so the gap stays on the record.
 MANUAL_DOWNLOADS = [
     {
-        "label": "UAE Federal Decree-Law 45/2021 — Personal Data Protection Law",
-        "dest": "UAE_National/UAE_Federal_PDPL_45_2021.pdf",
-        "why": "uaelegislation.gov.ae returns 403 behind a Cloudflare challenge; "
-               "the official u.ae publication is Arabic only. No official English "
-               "PDF located — circulating English copies are private-site mirrors.",
-    },
-    {
         "label": "Qatar National Health Strategy 2024-2030",
         "dest": "Qatar_MOPH/Qatar_MOPH_National_Health_Strategy_2024-2030.pdf",
         "why": "moph.gov.qa publishes a landing page only, no downloadable PDF. "
                "Request from nationalpmo@moph.gov.qa.",
-    },
-    {
-        "label": "IMDRF N88 (GMLP) and N81 (software risk characterization), 2025",
-        "dest": "International/",
-        "why": "imdrf.org was unreachable during research (TCP timeout, not a "
-               "block). URLs are unverified — confirm before scripting.",
-    },
-    {
-        "label": "Qatar Law No. 13 of 2016 on Protecting Personal Data Privacy",
-        "dest": "Qatar_National/Qatar_Law_13_2016_Personal_Data_Privacy.pdf",
-        "why": "almeezan.qa (the official legal portal) serves an incomplete TLS "
-               "chain, so verification fails. Disabling certificate checks to "
-               "fetch the text of a law is not an acceptable trade: a MITM could "
-               "substitute altered legislation and it would be cited as "
-               "authoritative. Download it manually in a browser from "
-               "https://www.almeezan.qa/LawPage.aspx?id=3948&language=en",
     },
 ]
 
@@ -402,8 +406,11 @@ def verify_content(doc: Doc) -> tuple[bool, str]:
 
 
 def process(doc: Doc, force: bool) -> str:
-    """Returns one of: skip, ok, mismatch, fail."""
-    if doc.path.exists() and not force:
+    """Returns one of: skip, ok, mismatch, fail, manual."""
+    if doc.manual and not doc.path.exists():
+        print(f"  [man ] {doc.dest}\n         supply by hand -- {doc.note}")
+        return "manual"
+    if doc.path.exists() and (not force or doc.manual):
         ok, err = verify_content(doc)
         if ok:
             print(f"  [have] {doc.dest}")
@@ -443,13 +450,13 @@ def main() -> int:
     docs = [d for d in DOCS if args.only.lower() in d.dest.lower()]
     print(f"{len(docs)} document(s) selected\n")
 
-    results: dict[str, list[str]] = {"ok": [], "skip": [], "fail": [], "mismatch": []}
+    results: dict[str, list[str]] = {"ok": [], "skip": [], "fail": [], "mismatch": [], "manual": []}
 
     for doc in docs:
         if args.verify:
             if not doc.path.exists():
                 print(f"  [miss] {doc.dest}")
-                results["fail"].append(doc.dest)
+                results["manual" if doc.manual else "fail"].append(doc.dest)
                 continue
             ok, err = verify_content(doc)
             print(f"  [{'ok  ' if ok else 'BAD '}] {doc.dest}" + (f"\n         {err}" if err else ""))
@@ -462,7 +469,8 @@ def main() -> int:
 
     print("\n" + "=" * 70)
     print(f"  downloaded {len(results['ok'])} | already present {len(results['skip'])} "
-          f"| failed {len(results['fail'])} | wrong content {len(results['mismatch'])}")
+          f"| failed {len(results['fail'])} | wrong content {len(results['mismatch'])} "
+          f"| manual missing {len(results['manual'])}")
 
     for dest in results["fail"]:
         print(f"    FAILED   {dest}")

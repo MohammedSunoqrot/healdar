@@ -213,3 +213,28 @@ Per the research rules, no paywalled content is included. All of these are refer
 6. Add MDCG 2023-4 / 2025-4 / 2025-10, FDA cybersecurity 2026, FDA-EMA Good AI Practice, WHO LMM, Qatar Law 13/2016.
 7. Apply the §2.3 renames.
 8. Resolve the two open manual gaps: UAE Federal PDPL 45/2021 (English) and IMDRF N88/N81 URL verification.
+
+---
+
+## 6. Status update — 13 September 2026 (Healdar 2.0.0)
+
+The gaps this report flagged as needing manual sourcing are now closed, with the files
+supplied by hand and recorded in `scripts/download_docs.py` as `manual=True` entries:
+
+| Document | Now at | Note |
+|---|---|---|
+| IMDRF N81 FINAL:2025 (software-specific risk) | `INT_IMDRF/INT_IMDRF_N81_Software_Specific_Risk_Characterization_2025.pdf` | Cover verified: "IMDRF/SaMD WG/N81 FINAL: 2025", 27 Jan 2025. |
+| IMDRF N88 FINAL:2025 (GMLP) | `INT_IMDRF/INT_IMDRF_N88_Good_Machine_Learning_Practice_2025.pdf` | Cover verified: "IMDRF/AIML WG/N88 FINAL: 2025", 27 Jan 2025. |
+| Qatar Law No. 13 of 2016 | `Qatar_Legislation/Qatar_Law_13_2016_Personal_Data_Privacy.pdf` | Official Gazette Dept. (Ministry of Justice) English translation. |
+| UAE Federal Decree-Law No. 45 of 2021 (PDPL) | `UAE_Federal/UAE_Federal_PDPL_Decree_Law_45_2021_AR.pdf` | Official Arabic text (Dubai Judicial Institute edition). No official English text exists, so it is ingested in Arabic; answers cite it and translate the quoted wording. |
+
+The Arabic PDF's fonts carry reversed ligature mappings, so PyMuPDF extracts corrupted
+text ("عىل" for "على"). `src/ingest.py` now scores both PyMuPDF and pypdf on Arabic
+documents and keeps the correct one.
+
+Folder names in this report predate the reorganisation. Current layout:
+`EU_MDR_MDCG` → `EU_Legislation` / `EU_MDCG` / `EU_AI_Office`; `SFDA` → `KSA_SFDA`;
+`UAE_National` → `UAE_Federal`; `International` → `INT_WHO` / `INT_IMDRF`;
+`Qatar_National` → `Qatar_Legislation`.
+
+Remaining open gap: Qatar National Health Strategy 2024–2030 (no downloadable document).

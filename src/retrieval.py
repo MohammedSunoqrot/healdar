@@ -97,8 +97,12 @@ class Retriever:
         *,
         hybrid: bool | None = None,
         embedding_function=None,
+        group_of: dict[str, str] | None = None,
     ) -> None:
         self._collection = collection
+        # Maps a folder tag to the jurisdiction it belongs to, for balancing.
+        # Unknown tags are their own group.
+        self._group_of = dict(group_of or {})
         self._hybrid = config.HYBRID_SEARCH if hybrid is None else hybrid
         # Needed to score lexical-only hits against the query. Chroma exposes
         # the collection's function only as a private attribute, so accept an
@@ -312,8 +316,7 @@ class Retriever:
         quality = "weak" if best is not None and best > config.WEAK_DISTANCE else "ok"
         return RetrievalResult(selected, quality=quality, best_distance=best)
 
-    @staticmethod
-    def _balance(passages: list[Passage], top_k: int) -> list[Passage]:
+    def _balance(self, passages: list[Passage], top_k: int) -> list[Passage]:
         """
         Take the best passages while capping how many any one jurisdiction may
         contribute, then backfill from the remainder if that leaves us short.
@@ -333,10 +336,11 @@ class Retriever:
         for p in passages:
             if len(picked) >= top_k:
                 break
-            n = counts.get(p.jurisdiction, 0)
+            group = self._group_of.get(p.jurisdiction, p.jurisdiction)
+            n = counts.get(group, 0)
             if n < cap:
                 picked.append(p)
-                counts[p.jurisdiction] = n + 1
+                counts[group] = n + 1
             else:
                 overflow.append(p)
 

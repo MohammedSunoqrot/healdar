@@ -13,6 +13,12 @@ import re
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# Release -- shown in the sidebar so users can tell which build answered them.
+# ---------------------------------------------------------------------------
+APP_VERSION  = "2.0.0"
+RELEASE_DATE = "2026-09-13"
+
+# ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
 SRC_DIR      = Path(__file__).resolve().parent
@@ -54,7 +60,17 @@ def _env_bool(name: str, default: bool = False) -> bool:
 # Vector store / embeddings
 # ---------------------------------------------------------------------------
 COLLECTION_NAME = _env_str("HEALDAR_COLLECTION", "regradar")
-EMBED_MODEL     = _env_str("HEALDAR_EMBED_MODEL", "all-MiniLM-L6-v2")
+# Multilingual: the UAE PDPL is indexed in its official Arabic, and this model
+# retrieves it from English questions. Chosen by benchmark on this corpus
+# (hit@5, plus a clean gap between on- and off-topic distances so the
+# relevance gate can refuse):
+#   all-MiniLM-L6-v2 (English only)         89.8%  gap +0.255  misses the Arabic law
+#   intfloat/multilingual-e5-small          87.0%  gap -0.011  cannot gate at all
+#   paraphrase-multilingual-MiniLM-L12-v2   92.6%  gap +0.261
+# Changing it requires `python src/embed.py --rebuild` and re-measuring the gate.
+EMBED_MODEL     = _env_str(
+    "HEALDAR_EMBED_MODEL", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+)
 
 # Auto-rebuild the Chroma index from chunks.json when it is missing or
 # unreadable (corrupt index, un-pulled Git LFS pointer, Chroma version bump).
@@ -85,14 +101,16 @@ TOP_K       = _env_int("HEALDAR_TOP_K", 5)          # passages handed to the LLM
 CANDIDATE_K = _env_int("HEALDAR_CANDIDATE_K", 20)   # pool fetched before fusion
 
 # Chroma returns cosine DISTANCE (0 = identical, 2 = opposite).
-# Measured on this corpus with all-MiniLM-L6-v2:
-#   on-topic regulatory queries  ->  0.185 .. 0.475
-#   clearly off-topic queries    ->  0.759 .. 0.912
-# 0.62 sits in the empty band between the two, with margin on both sides.
-MAX_DISTANCE = _env_float("HEALDAR_MAX_DISTANCE", 0.62)
+# Measured on this corpus with paraphrase-multilingual-MiniLM-L12-v2, best
+# match per question over the golden set:
+#   on-topic regulatory questions  ->  at most  0.403  (mean 0.228)
+#   clearly off-topic questions    ->  at least 0.664  (mean 0.726)
+# 0.53 sits mid-way in the empty band between the two. Re-measure whenever
+# the embedding model or the corpus changes.
+MAX_DISTANCE = _env_float("HEALDAR_MAX_DISTANCE", 0.53)
 
 # Above this, material was found but is a weak match — answer, but warn.
-WEAK_DISTANCE = _env_float("HEALDAR_WEAK_DISTANCE", 0.52)
+WEAK_DISTANCE = _env_float("HEALDAR_WEAK_DISTANCE", 0.45)
 
 # Lexical (BM25) search alongside dense search. Regulatory questions lean on
 # exact tokens ("Article 120", "MDS-G010", "Annex VIII") that embeddings blur.
@@ -133,4 +151,12 @@ RATE_LIMIT_WINDOW  = _env_int("HEALDAR_RATE_LIMIT_WINDOW", 600)  # seconds
 # One definition used by the pipeline, the UI and both exporters. Matches the
 # clean tag "[Source 3]" and the legacy verbose "[Source 3: file.pdf | p.4]".
 # ---------------------------------------------------------------------------
-CITATION_RE = re.compile(r"\[Source\s*(\d+)[^\]]*\]", re.IGNORECASE)
+# Models do not always use ASCII brackets: gpt-oss regularly writes
+# 【Source 2】 (U+3010/U+3011) and occasionally the full-width ［Source 2］.
+# Those were neither rendered as footnotes nor matched to references, so the
+# answer silently lost its reference list. rag_pipeline rewrites every variant
+# to the canonical "[Source N]" right after generation; accepting them here as
+# well keeps anything stored before that change readable.
+CITATION_RE = re.compile(
+    r"[\[【［]\s*Source\s*(\d+)[^\]】］]*[\]】］]", re.IGNORECASE
+)
