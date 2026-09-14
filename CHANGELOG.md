@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.1.1 — 2026-09-14
+
+- **Arabic answers read right to left.** Layout followed the interface language, so an
+  Arabic question asked with the English interface got its Arabic answer laid out left to
+  right. Direction now follows the text of each answer and question, on screen and in the
+  Word export.
+- **Arabic answers export to PDF in Arabic.** The PDF switched to the English answer,
+  because its built-in font has no Arabic letters. It now uses the bundled IBM Plex Sans
+  Arabic, with letters joined and lines ordered right to left; English reports print
+  Arabic source excerpts too, instead of "see the Word export". If the font cannot load,
+  the PDF falls back to English rather than failing.
+- **Flags show on Windows.** Windows has no flag emoji and showed "SA", "AE"… instead; a
+  4.6 KB bundled flag font now draws them.
+- **Starting a new conversation** is a button at the top of the sidebar, as well as a
+  clearer button under the question box.
+
 ## 2.1.0 — 2026-09-14
 
 Follow-up conversations.
@@ -182,7 +198,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 244 (269 in 2.1.0).
+- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1).
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

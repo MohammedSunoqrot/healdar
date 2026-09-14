@@ -1,6 +1,6 @@
 [project]
 name = "healdar"
-version = "2.1.0"
+version = "2.1.1"
 description = "Bilingual health-AI regulatory navigator (RAG over official regulatory documents)"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }

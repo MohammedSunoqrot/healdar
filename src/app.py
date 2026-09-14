@@ -12,6 +12,7 @@ mode" with CSS overrides over a forced dark theme; Streamlit's widgets never
 got those colours, which is why light mode had black buttons and header.)
 """
 
+import base64
 import csv
 import dataclasses
 import html as _html
@@ -288,8 +289,19 @@ _CSS = """
   gap:.6rem; margin-bottom:.85rem; flex-wrap:wrap; }
 .hd-badge { display:inline-flex; align-items:center; gap:.35rem; padding:.22rem .8rem;
   border-radius:999px; font-size:.78rem; font-weight:700; color:#fff; }
+/* Windows has no flag emoji and shows "SA", "AE"... instead. A tiny bundled
+   font (see _flag_css) draws them; its unicode-range limits it to the flag
+   letters, so every other character keeps Streamlit's own font. Applied only
+   where flags appear -- never globally, which would break the icon font. */
+[data-testid="stMarkdownContainer"], .hd-badge,
+[data-baseweb="select"] div, li[role="option"], li[role="option"] * {
+  font-family: "Healdar Flags", "Source Sans", "Source Sans Pro", sans-serif !important; }
 .hd-meta { font-size:.72rem; opacity:.6; }
 .hd-understood { display:block; margin-top:.3rem; font-size:.76rem; font-weight:400; opacity:.72; }
+/* Streamlit's container sets text-align:left, which an answer marked dir="rtl"
+   inherited: Arabic ran right to left but hugged the left edge. "start"
+   follows each answer's own direction. */
+.hd-body, .hd-body :where(p, li, h1, h2, h3, h4, h5, h6, blockquote) { text-align:start; }
 /* Question lists read as lists: left-aligned, not centred button captions.
    Keyed containers give a stable class; Streamlit's own button markup is not. */
 .st-key-hd_history button, .st-key-hd_history button *,
@@ -374,8 +386,23 @@ a.hd-li { display:inline-flex; align-items:center; gap:.35rem; margin-top:.35rem
 """
 
 
+@st.cache_resource
+def _flag_css() -> str:
+    """The flag font as an inline @font-face (4.6 KB, subset to Healdar's five flags)."""
+    path = SCRIPT_DIR / "assets" / "fonts" / "HealdarFlags.woff2"
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    if not data.startswith(b"wOF2"):   # a Git LFS pointer, not the font
+        return ""
+    return ("<style>@font-face{font-family:'Healdar Flags';"
+            f"src:url(data:font/woff2;base64,{base64.b64encode(data).decode()}) format('woff2');"
+            "unicode-range:U+1F1E6-1F1FF;}</style>")
+
+
 def inject_css() -> None:
-    st.markdown(_CSS, unsafe_allow_html=True)
+    st.markdown(_CSS + _flag_css(), unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -546,9 +573,11 @@ def _copy_component_html(text: str, label_copy: str, label_copied: str) -> str:
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
-def _pdf_bytes(question, answer, sources, jx_label, question_original) -> bytes:
+def _pdf_bytes(question, answer, sources, jx_label, question_original,
+               question_en="", answer_en="") -> bytes:
     return _export.to_pdf(question=question, answer=answer, sources=sources,
-                          jurisdiction=jx_label, question_original=question_original)
+                          jurisdiction=jx_label, question_original=question_original,
+                          question_en=question_en, answer_en=answer_en)
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
@@ -568,7 +597,7 @@ def understood_as(result: RAGAnswer) -> str:
 
 
 def render_question_bubble(question: str, lang: str, understood: str = "") -> None:
-    rtl = " hd-rtl" if lang == "ar" else ""
+    rtl = " hd-rtl" if formatting.is_rtl_text(question) else ""
     # A rewritten follow-up is shown, so the reader can see what was searched.
     extra = (f'<span class="hd-understood">{_html.escape(T[lang]["understood_as"])}: '
              f'<span dir="ltr">{_html.escape(understood)}</span></span>' if understood else "")
@@ -597,7 +626,10 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
         for n in notices
     )
 
-    dir_attr = ' dir="rtl"' if lang == "ar" else ""
+    # Direction follows the answer, not the interface: an Arabic question asked
+    # with the English interface got its Arabic answer laid out left to right.
+    rtl_answer = formatting.is_rtl_text(result.answer)
+    dir_attr = ' dir="rtl"' if rtl_answer else ""
     if result.no_context:
         body = f'<p class="no-context">{_html.escape(T[lang]["no_context"])}</p>'
         meta = ""
@@ -628,15 +660,20 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
     with col_pdf:
         st.download_button(
             T[lang]["export_pdf"],
-            _pdf_bytes(result.question_en or result.question,
-                       result.answer_en or result.answer, sources, label, result.question),
+            # An Arabic answer exports in Arabic; its English version is the
+            # fallback if the bundled Arabic font cannot be loaded.
+            (_pdf_bytes(result.question, result.answer, sources, label, "",
+                        result.question_en, result.answer_en) if rtl_answer else
+             _pdf_bytes(result.question_en or result.question,
+                        result.answer_en or result.answer, sources, label, result.question)),
             file_name=f"{fname}.pdf", mime="application/pdf",
             width="stretch", key=f"pdf_{card_id}_{id(result)}",
         )
     with col_word:
         st.download_button(
             T[lang]["export_word"],
-            _docx_bytes(result.question, result.answer, sources, label, lang),
+            _docx_bytes(result.question, result.answer, sources, label,
+                        "ar" if rtl_answer else "en"),
             file_name=f"{fname}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             width="stretch", key=f"word_{card_id}_{id(result)}",
@@ -909,6 +946,11 @@ def render_sidebar(lang: str) -> tuple[str, bool]:
             f'<div class="hd-ver-date">{T[lang]["released"]}: {release_date_label(lang)}</div>',
             unsafe_allow_html=True,
         )
+        # Starting over is one obvious click at the top, not a small link at the
+        # bottom of a long conversation.
+        if st.session_state.get("thread") and not st.session_state.get("compare"):
+            st.button(T[lang]["new_conversation"], key="new_conv_sidebar", type="primary",
+                      width="stretch", on_click=_new_conversation)
 
         st.markdown(f'<div class="sidebar-label">{T[lang]["lang_label"]}</div>',
                     unsafe_allow_html=True)
@@ -1102,7 +1144,8 @@ def render_thread(rag: HealdarRAG, lang: str) -> None:
     question_form(lang, T[lang]["followup_placeholder"])
     _, mid, _ = st.columns([1, 8, 1])
     with mid:
-        st.button(T[lang]["new_conversation"], type="tertiary", on_click=_new_conversation)
+        st.button(T[lang]["new_conversation"], key="new_conv_bottom", type="secondary",
+                  on_click=_new_conversation)
     if st.session_state.scroll_latest:
         st.session_state.scroll_latest = False
         _components.html(_SCROLL_JS, height=0)

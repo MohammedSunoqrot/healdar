@@ -13,7 +13,7 @@ license: apache-2.0
 
 # 📡🩺 Healdar — Health AI Regulatory Navigator
 
-**Version 2.1.0 · released 14 September 2026**
+**Version 2.1.1 · released 14 September 2026**
 
 **Bilingual AI assistant for navigating health AI regulations across the Gulf region, Europe, the United States and international bodies.**
 
@@ -51,7 +51,7 @@ properties matter more than fluency here:
 | **Comparison mode** | Two jurisdictions side by side, queried in parallel |
 | **Readable answers** | Lists, emphasis and tables are rendered properly — no stray `**` or `|` — in the app and in both exports |
 | **Relevance shown** | Every reference shows how well it matched; click it to read the passage |
-| **Export** | PDF and Word, with the same citation numbers as the answer |
+| **Export** | PDF and Word, with the same citation numbers as the answer. Arabic answers export in Arabic, right to left |
 | **Your session** | A private summary of *your own* questions this session — nothing is shown to other visitors |
 | **Light & dark** | Follows your system setting; switch any time from the ⋮ menu (top right): System, Light or Dark |
 | **Version shown** | The sidebar shows the running version and its release date |
@@ -121,7 +121,7 @@ Healdar/
 │   ├── raw_docs/               # source PDFs, one folder per regulator — NOT committed
 │   └── runtime/                # local runtime data — NOT committed
 │
-├── tests/                  # 269 tests
+├── tests/                  # 281 tests
 └── .github/workflows/ci.yml
 ```
 
@@ -176,7 +176,7 @@ Decree-Law 45/2021, whose official text is Arabic only.
 ### Running the checks
 
 ```bash
-pytest tests -q                       # 269 tests
+pytest tests -q                       # 281 tests
 python eval/run_eval.py               # retrieval metrics (no API key needed)
 python eval/run_eval.py --full        # also generates answers (uses Groq)
 ruff check src tests eval scripts
@@ -254,7 +254,7 @@ only, with no downloadable document.
 | Lexical search | [rank-bm25](https://github.com/dorianbrown/rank_bm25) |
 | Vector store | [ChromaDB](https://www.trychroma.com/) 1.5 |
 | PDF parsing | PyMuPDF, with pypdf for Arabic documents whose fonts PyMuPDF mis-decodes |
-| Export | ReportLab (PDF) + python-docx (Word) |
+| Export | ReportLab (PDF; arabic-reshaper + python-bidi for Arabic) + python-docx (Word) |
 
 ---
 
@@ -270,3 +270,6 @@ against the official published documents and consult the relevant regulatory bod
 Apache 2.0 — see [LICENSE](LICENSE).
 
 Copyright 2026 Mohammed R. S. Sunoqrot
+
+Bundled fonts: IBM Plex Sans Arabic (SIL OFL 1.1) for Arabic PDFs, and flag glyphs from
+Twemoji (CC-BY 4.0) so flags show on Windows — see `src/assets/fonts/`.

@@ -266,6 +266,23 @@ def pdf_safe(text: str) -> str:
     return "".join(out)
 
 
+_ARABIC_LETTER = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
+_ANY_LETTER = re.compile(r"[^\W\d_]")
+
+
+def is_rtl_text(text: str) -> bool:
+    """
+    Mostly Arabic? Layout follows the text itself, not the interface language:
+    an Arabic question asked with the English interface got an Arabic answer
+    laid out left to right. English terms and "[Source N]" tags inside an
+    Arabic answer stay well under the threshold.
+    """
+    letters = _ANY_LETTER.findall(text or "")
+    if not letters:
+        return False
+    return sum(1 for ch in letters if _ARABIC_LETTER.match(ch)) / len(letters) > 0.3
+
+
 def is_pdf_renderable(text: str) -> bool:
     """False when most of the text would vanish in pdf_safe (e.g. Arabic)."""
     letters = [c for c in text if c.isalpha()]

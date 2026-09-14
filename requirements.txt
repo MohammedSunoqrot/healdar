@@ -13,6 +13,9 @@ langchain-text-splitters==1.1.2
 tiktoken==0.13.0
 reportlab==4.5.1
 python-docx==1.2.0
+# Arabic PDF export: letter joining and right-to-left line order for reportlab.
+arabic-reshaper==3.0.1
+python-bidi==0.6.11
 requests==2.32.5
 # pypdf needs it to open AES-encrypted PDFs (e.g. the UAE PDPL Arabic text).
 cryptography==50.0.1

@@ -1,0 +1,13 @@
+HealdarFlags.woff2
+
+A subset of the "Twemoji Country Flags" font (country-flag-emoji-polyfill),
+cut down to the regional-indicator letters Healdar's flags use (A, E, Q, S, U:
+Saudi Arabia, UAE, Qatar, EU, USA). Windows has no flag emoji and shows the
+two letters instead; this font draws the flags.
+
+Flag graphics: Twemoji, Copyright Twitter, Inc and other contributors,
+licensed under CC-BY 4.0 — https://creativecommons.org/licenses/by/4.0/
+Source: https://github.com/twitter/twemoji
+
+IBMPlexSansArabic-*.ttf: IBM Plex Sans Arabic, Copyright 2019 IBM Corp.,
+licensed under the SIL Open Font License 1.1 (see OFL-IBMPlexSansArabic.txt).
