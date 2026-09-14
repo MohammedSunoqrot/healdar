@@ -171,6 +171,7 @@ ephemeral here too.
 | "The configured language model was rejected" | Groq retired the model | Set `GROQ_MODEL_ANSWER` to a current model from [the model list](https://console.groq.com/docs/models) |
 | "Healdar is temporarily unavailable" on load | Missing `GROQ_API_KEY`, or the index could not be opened or rebuilt | The card shows the underlying error; check the container logs |
 | Rate-limit warnings under load | Groq free-tier quota: 8,000 tokens a minute for `gpt-oss-120b`, and one question requests about 5,000 of them | Set `HEALDAR_RATE_LIMIT_QUERIES`, or upgrade the Groq plan. `HEALDAR_QUERY_PLANNING=0` saves ~650 tokens a question, at the cost of weaker answers to case questions |
+| "Healdar has used today's free AI allowance" | Both models' daily allowances are used up. The free plan gives `gpt-oss-120b` 200,000 tokens a day (about 40 questions); after that answers come from the backup `gpt-oss-20b` until its allowance runs out too | Wait for the time the message shows, or upgrade the Groq plan |
 | Answers are hedged or refused too often | Relevance gate too tight for your corpus | Raise `HEALDAR_MAX_DISTANCE`, then re-run `python eval/run_eval.py` to confirm off-topic questions are still refused |
 
 ---

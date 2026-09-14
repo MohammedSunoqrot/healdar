@@ -105,7 +105,13 @@ class HealdarError(Exception):
 
 
 class RateLimitError(HealdarError):
-    """Groq returned 429."""
+    """Groq returned 429. `daily` when a per-day allowance ran out, not a per-minute one."""
+
+    def __init__(self, message: str = "Groq rate limit reached", *,
+                 daily: bool = False, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.daily = daily
+        self.retry_after = retry_after
 
 
 class ServiceUnavailableError(HealdarError):
@@ -120,10 +126,29 @@ class RetrievalError(HealdarError):
     """The vector store failed. Distinct from 'nothing relevant was found'."""
 
 
+_RETRY_RE = re.compile(r"try again in\s*(?:(\d+)h)?\s*(?:(\d+)m(?!s))?\s*(?:([\d.]+)s)?",
+                       re.IGNORECASE)
+
+
+def _rate_limit_from(message: str) -> RateLimitError:
+    """
+    Groq's 429 says which allowance ran out and when it frees up: "... on tokens
+    per day (TPD): Limit 200000, Used 199653 ... Please try again in 30m48.96s".
+    A used-up daily allowance is not "wait a moment".
+    """
+    daily = bool(re.search(r"per day|\((?:TPD|RPD)\)", message, re.IGNORECASE))
+    retry_after = None
+    match = _RETRY_RE.search(message)
+    if match and any(match.groups()):
+        hours, minutes, seconds = match.groups()
+        retry_after = int(hours or 0) * 3600 + int(minutes or 0) * 60 + float(seconds or 0)
+    return RateLimitError("Groq rate limit reached", daily=daily, retry_after=retry_after)
+
+
 def _wrap_groq_error(exc: Exception) -> Exception:
     """Map a Groq SDK exception onto a Healdar error the UI can render."""
     if isinstance(exc, groq.RateLimitError):
-        return RateLimitError("Groq rate limit reached")
+        return _rate_limit_from(str(exc))
     if isinstance(exc, (groq.APITimeoutError, groq.APIConnectionError)):
         return ServiceUnavailableError(f"Could not reach Groq: {exc}")
     if isinstance(exc, groq.APIStatusError):
@@ -411,7 +436,7 @@ class HealdarRAG:
         prompt = self._build_prompt(
             question_en, passages, history=history, search_question=search_query
         )
-        raw_answer = self._generate(prompt)
+        raw_answer, used_model = self._generate(prompt)
         english_answer, coverage = self._extract_coverage(canonical_citations(raw_answer))
         english_answer, followups_en = self._extract_followups(english_answer)
 
@@ -429,7 +454,7 @@ class HealdarRAG:
             quality=found.quality,
             best_distance=found.best_distance,
             coverage=coverage,
-            model=self.answer_model,
+            model=used_model,
             search_question=search_query,
             followups=followups,
         )
@@ -996,21 +1021,47 @@ class HealdarRAG:
     # Groq
     # ------------------------------------------------------------------
 
-    def _chat(
-        self,
-        *,
-        model: str,
-        content: str,
-        temperature: float,
-        max_tokens: int,
-    ) -> str:
+    def _chat(self, *, model: str, content: str, temperature: float, max_tokens: int) -> str:
+        """One chat completion's text; see _complete."""
+        return self._complete(model=model, content=content, temperature=temperature,
+                              max_tokens=max_tokens)[0]
+
+    def _complete(self, *, model: str, content: str, temperature: float,
+                  max_tokens: int) -> tuple[str, str]:
+        """
+        One chat completion, returning (text, model actually used).
+
+        When Groq refuses a model because its *daily* allowance is used up, the
+        same request goes once to the backup model, which has an allowance of
+        its own. Otherwise the whole site stops answering until the allowance
+        frees up: the free plan gives gpt-oss-120b 200,000 tokens a day, about
+        40 questions. Per-minute limits are not rerouted -- they clear in seconds.
+        """
+        try:
+            return self._call(model=model, content=content, temperature=temperature,
+                              max_tokens=max_tokens), model
+        except RateLimitError as exc:
+            backup = config.GROQ_MODEL_FALLBACK
+            if not exc.daily or not backup or backup == model:
+                raise
+            logger.warning("Daily allowance used up for %s; using %s", model, backup)
+            # The backup reasons before it writes, and that counts against the
+            # budget: low effort plus headroom keeps the answer from being cut off.
+            text = self._call(model=backup, content=content, temperature=temperature,
+                              max_tokens=max_tokens + 1500, reasoning_effort="low")
+            return text, backup
+
+    def _call(self, *, model: str, content: str, temperature: float, max_tokens: int,
+              reasoning_effort: str | None = None) -> str:
         """One chat completion, with Groq exceptions mapped to Healdar errors."""
+        extra = {"reasoning_effort": reasoning_effort} if reasoning_effort else {}
         try:
             resp = self._groq.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": content}],
                 temperature=temperature,
                 max_tokens=max_tokens,
+                **extra,
             )
         except Exception as exc:
             wrapped = _wrap_groq_error(exc)
@@ -1022,8 +1073,9 @@ class HealdarRAG:
         message = resp.choices[0].message.content
         return (message or "").strip()
 
-    def _generate(self, prompt: str) -> str:
-        return self._chat(
+    def _generate(self, prompt: str) -> tuple[str, str]:
+        """The answer, and the model that wrote it (the backup, on a used-up day)."""
+        return self._complete(
             model=self.answer_model,
             content=prompt,
             temperature=config.ANSWER_TEMPERATURE,

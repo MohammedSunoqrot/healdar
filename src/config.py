@@ -15,7 +15,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Release -- shown in the sidebar so users can tell which build answered them.
 # ---------------------------------------------------------------------------
-APP_VERSION  = "2.1.2"
+APP_VERSION  = "2.1.3"
 RELEASE_DATE = "2026-09-14"
 
 # ---------------------------------------------------------------------------
@@ -90,6 +90,10 @@ AUTO_REBUILD_VECTORSTORE = _env_bool("HEALDAR_AUTO_REBUILD", True)
 GROQ_MODEL_SMALL  = _env_str("GROQ_MODEL",        "openai/gpt-oss-20b")
 GROQ_MODEL_LARGE  = _env_str("GROQ_MODEL_LARGE",  "openai/gpt-oss-120b")
 GROQ_MODEL_ANSWER = _env_str("GROQ_MODEL_ANSWER", GROQ_MODEL_LARGE)
+# When a model's *daily* allowance is used up, the same request goes to this one
+# instead, which has an allowance of its own. "none" turns the fallback off.
+_fallback = _env_str("GROQ_MODEL_FALLBACK", GROQ_MODEL_SMALL)
+GROQ_MODEL_FALLBACK = "" if _fallback.lower() in {"none", "off", "0"} else _fallback
 
 GROQ_TIMEOUT     = _env_float("GROQ_TIMEOUT", 45.0)
 GROQ_MAX_RETRIES = _env_int("GROQ_MAX_RETRIES", 2)

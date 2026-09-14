@@ -145,6 +145,8 @@ T = {
         "stat_jx":        "Jurisdictions",
         "session_dl":     "⬇ Download my session (CSV)",
         "rate_limit":     "⏳ The language-model rate limit was reached — please wait a moment and try again.",
+        "rate_limit_daily": "⏳ Healdar has used today's free AI allowance. It frees up again in {wait} — please try then.",
+        "backup_model":   "Answered by the backup AI model, because today's allowance for the main model is used up. Quality may be a little lower than usual.",
         "starter_prompt": "Try asking",
         "weak_match":     "Only loosely related material was found — verify against the source documents before relying on this.",
         "partial_answer": "The documents only partly cover this question. Treat the answer as incomplete.",
@@ -204,6 +206,8 @@ T = {
         "stat_jx":        "الجهات",
         "session_dl":     "⬇ تنزيل جلستي (CSV)",
         "rate_limit":     "⏳ تم الوصول إلى حد الطلبات — يرجى الانتظار لحظة ثم المحاولة مجدداً.",
+        "rate_limit_daily": "⏳ استنفد هيلدار الحصة المجانية اليومية للذكاء الاصطناعي. ستتوفر مجدداً خلال {wait}، يُرجى المحاولة حينها.",
+        "backup_model":   "أُجيب عن هذا السؤال بالنموذج الاحتياطي لأن الحصة اليومية للنموذج الرئيسي نفدت، وقد تكون الجودة أقل قليلاً من المعتاد.",
         "starter_prompt": "جرّب أن تسأل",
         "weak_match":     "لم يُعثر إلا على محتوى ضعيف الصلة — يُرجى التحقق من الوثائق الرسمية قبل الاعتماد على هذه الإجابة.",
         "partial_answer": "الوثائق تغطي هذا السؤال جزئياً فقط. اعتبر الإجابة غير مكتملة.",
@@ -641,6 +645,9 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
     # answer with the same confidence as a solid one.
     notices = []
     if not result.no_context:
+        used = getattr(result, "model", "")
+        if used and used == config.GROQ_MODEL_FALLBACK and used != config.GROQ_MODEL_ANSWER:
+            notices.append(T[lang]["backup_model"])
         if getattr(result, "quality", "ok") == "weak":
             notices.append(T[lang]["weak_match"])
         if getattr(result, "coverage", "full") == "partial":
@@ -707,8 +714,25 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
+def wait_text(seconds: float | None, lang: str) -> str:
+    """Groq's retry-after in words: "about 31 minutes", "about 2 hours 5 minutes"."""
+    if not seconds:
+        return "a little while" if lang == "en" else "وقت قصير"
+    hours, minutes = divmod(max(1, round(seconds / 60)), 60)
+    if lang == "ar":
+        parts = ([f"{hours} ساعة"] if hours else []) + ([f"{minutes} دقيقة"] if minutes else [])
+        return "نحو " + " و".join(parts)
+    parts = ([f"{hours} hour{'s' if hours != 1 else ''}"] if hours else []) + \
+            ([f"{minutes} minute{'s' if minutes != 1 else ''}"] if minutes else [])
+    return "about " + " ".join(parts)
+
+
 def error_message(exc: Exception, lang: str) -> str:
     if isinstance(exc, RateLimitError):
+        # A used-up daily allowance is not "wait a moment": say when it frees up.
+        if getattr(exc, "daily", False):
+            return T[lang]["rate_limit_daily"].format(
+                wait=wait_text(getattr(exc, "retry_after", None), lang))
         return T[lang]["rate_limit"]
     if isinstance(exc, ModelUnavailableError):
         return T[lang]["err_model"]

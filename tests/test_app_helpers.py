@@ -350,6 +350,26 @@ class TestConversationList(unittest.TestCase):
         self.assertEqual(app.history_items([self._e("old")])[0]["key"], 0)
 
 
+class TestRateLimitMessages(unittest.TestCase):
+    """A used-up daily allowance says when it frees up, instead of "wait a moment"."""
+
+    def test_daily_limit_says_when_it_frees_up(self):
+        from rag_pipeline import RateLimitError
+        msg = app.error_message(RateLimitError("x", daily=True, retry_after=1849), "en")
+        self.assertIn("today", msg)
+        self.assertIn("about 31 minutes", msg)
+
+    def test_minute_limit_keeps_the_short_message(self):
+        from rag_pipeline import RateLimitError
+        self.assertEqual(app.error_message(RateLimitError("x"), "en"), app.T["en"]["rate_limit"])
+
+    def test_wait_text(self):
+        self.assertEqual(app.wait_text(1849, "en"), "about 31 minutes")
+        self.assertEqual(app.wait_text(7500, "en"), "about 2 hours 5 minutes")
+        self.assertEqual(app.wait_text(None, "en"), "a little while")
+        self.assertIn("31 دقيقة", app.wait_text(1849, "ar"))
+
+
 class TestNonAsciiCitationBrackets(unittest.TestCase):
     """Answers stored before canonicalisation still render and resolve."""
 

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.3 — 2026-09-14
+
+- **Keeps answering when the day's allowance runs out.** Groq's free plan gives the main
+  model (gpt-oss-120b) 200,000 tokens a day, about 40 questions, and after that every
+  question failed for the rest of the window. A request refused for a *daily* limit now
+  goes once to the smaller gpt-oss-20b, which has an allowance of its own, and the answer
+  carries a note that it came from the backup model. `GROQ_MODEL_FALLBACK=none` turns
+  this off.
+- **An honest message when both are used up.** "Please wait a moment and try again" sent
+  visitors into pointless retries. A daily limit now says so, with Groq's own estimate of
+  when it frees up ("in about 31 minutes"); short per-minute limits keep the old message.
+
 ## 2.1.2 — 2026-09-14
 
 - **Pick up earlier conversations.** Starting a new conversation used to leave the
@@ -208,7 +220,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1, 285 in 2.1.2).
+- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1, 285 in 2.1.2, 294 in 2.1.3).
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

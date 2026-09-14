@@ -412,14 +412,14 @@ class TestAskWithPlanning(unittest.TestCase):
         rag._retriever.search_many.return_value = RetrievalResult(
             [_passage(text="Rule 11 text", fname="MDCG_2019-11.pdf", jx="EU_MDCG")]
         )
-        rag._chat = mock.MagicMock(side_effect=list(chat_replies))
+        rag._call = mock.MagicMock(side_effect=list(chat_replies))
         return rag
 
     def test_off_topic_question_refused_without_planning(self):
         rag = self._rag(RetrievalResult([], quality="no_match", best_distance=0.8), [])
         answer = rag.ask("How do I bake sourdough bread?", "eu")
         self.assertTrue(answer.no_context)
-        rag._chat.assert_not_called()
+        rag._call.assert_not_called()
         rag._retriever.search_many.assert_not_called()
 
     def test_planned_queries_join_the_search(self):
@@ -586,7 +586,7 @@ class TestFollowUps(unittest.TestCase):
         rag._retriever.search_many.return_value = RetrievalResult(
             [_passage(text="Rule 11 exceptions", fname="MDCG_2019-11.pdf", jx="EU_MDCG", page=19)]
         )
-        rag._chat = mock.MagicMock(side_effect=list(chat_replies))
+        rag._call = mock.MagicMock(side_effect=list(chat_replies))
         return rag
 
     def test_follow_up_end_to_end(self):
@@ -604,7 +604,7 @@ class TestFollowUps(unittest.TestCase):
         self.assertEqual(answer.followups, ["What evidence does a Class IIb device need?"])
         self.assertEqual((answer.sources[0]["filename"], answer.sources[0]["page_number"]),
                          ("MDCG_2019-11.pdf", 18))                         # carried forward, first
-        self.assertEqual(rag._chat.call_count, 2)                          # plan + answer only
+        self.assertEqual(rag._call.call_count, 2)                          # plan + answer only
 
     def test_off_topic_follow_up_still_refused(self):
         rag = self._rag(["QUESTION: How do I bake sourdough bread?"],
@@ -612,7 +612,74 @@ class TestFollowUps(unittest.TestCase):
         answer = rag.ask("how do I bake sourdough bread?", "all", history=self.HISTORY)
         self.assertTrue(answer.no_context)
         rag._retriever.search_many.assert_not_called()
-        self.assertEqual(rag._chat.call_count, 1)
+        self.assertEqual(rag._call.call_count, 1)
+
+
+class TestDailyLimitFallback(unittest.TestCase):
+    """A used-up daily allowance reroutes to the backup model instead of failing."""
+
+    TPD = ("Error code: 429 - Rate limit reached for model `openai/gpt-oss-120b` in "
+           "organization `org_x` service tier `on_demand` on tokens per day (TPD): Limit "
+           "200000, Used 199653, Requested 4627. Please try again in 30m48.96s.")
+    TPM = ("Rate limit reached for model `openai/gpt-oss-120b` on tokens per minute (TPM): "
+           "Limit 8000, Used 4222, Requested 4482. Please try again in 5.28s.")
+
+    def test_daily_limit_is_recognised(self):
+        err = rp._rate_limit_from(self.TPD)
+        self.assertTrue(err.daily)
+        self.assertAlmostEqual(err.retry_after, 30 * 60 + 48.96, places=1)
+
+    def test_minute_limit_is_not_daily(self):
+        err = rp._rate_limit_from(self.TPM)
+        self.assertFalse(err.daily)
+        self.assertAlmostEqual(err.retry_after, 5.28, places=2)
+
+    @staticmethod
+    def _rag(*effects):
+        from unittest import mock
+        rag = _bare_rag()
+        rag._call = mock.MagicMock(side_effect=list(effects))
+        return rag
+
+    def test_daily_limit_reroutes_to_the_backup(self):
+        rag = self._rag(rp.RateLimitError("x", daily=True), "backup answer")
+        text, used = rag._complete(model=config.GROQ_MODEL_LARGE, content="q",
+                                   temperature=0, max_tokens=100)
+        self.assertEqual((text, used), ("backup answer", config.GROQ_MODEL_FALLBACK))
+        kwargs = rag._call.call_args.kwargs
+        self.assertEqual(kwargs["model"], config.GROQ_MODEL_FALLBACK)
+        self.assertEqual(kwargs["reasoning_effort"], "low")
+        self.assertGreater(kwargs["max_tokens"], 100)
+
+    def test_minute_limit_is_not_rerouted(self):
+        rag = self._rag(rp.RateLimitError("x", daily=False))
+        with self.assertRaises(rp.RateLimitError):
+            rag._complete(model=config.GROQ_MODEL_LARGE, content="q", temperature=0, max_tokens=100)
+        self.assertEqual(rag._call.call_count, 1)
+
+    def test_backup_can_be_turned_off(self):
+        from unittest import mock
+        rag = self._rag(rp.RateLimitError("x", daily=True))
+        with mock.patch.object(config, "GROQ_MODEL_FALLBACK", ""), \
+                self.assertRaises(rp.RateLimitError):
+            rag._complete(model=config.GROQ_MODEL_LARGE, content="q", temperature=0, max_tokens=100)
+
+    def test_answer_records_the_backup_model(self):
+        from unittest import mock
+        rag = _bare_rag()
+        rag.answer_model = config.GROQ_MODEL_LARGE
+        rag._retriever = mock.MagicMock()
+        found = RetrievalResult([_passage(text="Rule 11 text", jx="EU_MDCG")])
+        rag._retriever.search.return_value = found
+        rag._retriever.search_many.return_value = found
+        rag._call = mock.MagicMock(side_effect=[
+            "Rule 11 software classification",             # planner, main model
+            rp.RateLimitError("x", daily=True),            # answer, main model: used up
+            "Class IIa [Source 1].\nCOVERAGE: full",       # answer, backup model
+        ])
+        answer = rag.ask("Which class is my software under the EU MDR?", "eu")
+        self.assertEqual(answer.model, config.GROQ_MODEL_FALLBACK)
+        self.assertIn("Class IIa", answer.answer)
 
 
 class TestPromptAllowsReasoning(unittest.TestCase):
