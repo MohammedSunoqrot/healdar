@@ -131,7 +131,7 @@ T = {
         "copied":         "✓ Copied",
         "page":           "p.",
         "clear_history":  "🗑 Clear history",
-        "history_label":  "Recent questions",
+        "history_label":  "Your conversations",
         "export_pdf":     "📄 PDF",
         "export_word":    "📝 Word",
         "session_title":  "📊 Your session",
@@ -190,7 +190,7 @@ T = {
         "copied":         "✓ تم النسخ",
         "page":           "ص.",
         "clear_history":  "🗑 مسح السجل",
-        "history_label":  "الأسئلة الأخيرة",
+        "history_label":  "محادثاتك",
         "export_pdf":     "📄 PDF",
         "export_word":    "📝 Word",
         "session_title":  "📊 جلستك",
@@ -528,6 +528,30 @@ def select_cited_sources(answer: str, sources: list[dict]) -> list[tuple[int, di
     if cited and not indexed:
         return list(enumerate(sources, start=1))
     return indexed
+
+
+def history_items(chat_history: list) -> list[dict]:
+    """
+    The sidebar list: one row per conversation, titled by its first question,
+    and one per comparison -- most recently active first, so a conversation
+    picked up again moves back to the top.
+    """
+    items: list[dict] = []
+    by_conv: dict[int, dict] = {}
+    for idx, e in enumerate(chat_history):
+        if e.get("mode") == "single":
+            conv = e.get("conv", 0)
+            item = by_conv.get(conv)
+            if item is None:
+                item = by_conv[conv] = {"kind": "conv", "key": conv,
+                                        "title": e["question"], "turns": 0}
+                items.append(item)
+            item["turns"] += 1
+            item["last"] = idx
+        else:
+            items.append({"kind": "compare", "key": idx, "title": e["question"],
+                          "turns": 1, "last": idx})
+    return sorted(items, key=lambda it: it["last"], reverse=True)
 
 
 def build_history_context(chat_history: list) -> list[dict] | None:
@@ -877,10 +901,11 @@ def init_state() -> None:
         persisted = load_session()
         if persisted:
             st.session_state["chat_history"] = persisted
+            st.session_state["conv_seq"] = max((e.get("conv", 0) for e in persisted), default=0)
             last = persisted[-1]
             if last.get("mode") == "single":
                 st.session_state["last_result"] = last["result"]
-                st.session_state["thread"] = [last]
+                st.session_state["active_conv"] = last.get("conv", 0)
                 st.session_state["used_jx"] = last.get("jurisdiction")
             elif last.get("mode") == "compare":
                 st.session_state["last_result_l"] = last["result_l"]
@@ -890,7 +915,7 @@ def init_state() -> None:
 
     defaults: dict = {
         "lang": "en", "compare": False, "q_input": "", "pending_q": None,
-        "scroll_latest": False, "thread": [],
+        "scroll_latest": False, "active_conv": 1, "conv_seq": 1,
         "last_jx": "all", "last_result": None,
         "last_jx_l": "sfda", "last_jx_r": "eu",
         "last_result_l": None, "last_result_r": None,
@@ -918,7 +943,9 @@ def _on_submit() -> None:
 
 
 def _new_conversation() -> None:
-    st.session_state.thread = []
+    """Start a fresh thread. Earlier ones stay in the sidebar, ready to reopen."""
+    st.session_state.conv_seq += 1
+    st.session_state.active_conv = st.session_state.conv_seq
     st.session_state.selected_hist_idx = None
 
 
@@ -926,12 +953,34 @@ def _back_to_thread() -> None:
     st.session_state.selected_hist_idx = None
 
 
+def current_thread() -> list[dict]:
+    """The open conversation's turns, oldest first."""
+    conv = st.session_state.get("active_conv", 1)
+    return [e for e in st.session_state.chat_history
+            if e.get("mode") == "single" and e.get("conv", 0) == conv]
+
+
+def _open_conversation(conv: int) -> None:
+    """Reopen an earlier conversation where it left off, ready for a follow-up."""
+    st.session_state.active_conv = conv
+    st.session_state.selected_hist_idx = None
+    st.session_state.compare = False
+    turns = current_thread()
+    if turns:   # carry on in the jurisdiction that conversation used
+        st.session_state.last_jx = turns[-1].get("jurisdiction", st.session_state.last_jx)
+    st.session_state.scroll_latest = True
+
+
+def _open_comparison(idx: int) -> None:
+    st.session_state.selected_hist_idx = idx
+
+
 def _clear_history() -> None:
     for key in ("last_result", "last_result_l", "last_result_r",
                 "used_jx", "used_jx_l", "used_jx_r", "selected_hist_idx"):
         st.session_state[key] = None
     st.session_state.chat_history = []
-    st.session_state.thread = []
+    _new_conversation()
     save_session([])
 
 
@@ -948,7 +997,7 @@ def render_sidebar(lang: str) -> tuple[str, bool]:
         )
         # Starting over is one obvious click at the top, not a small link at the
         # bottom of a long conversation.
-        if st.session_state.get("thread") and not st.session_state.get("compare"):
+        if current_thread() and not st.session_state.get("compare"):
             st.button(T[lang]["new_conversation"], key="new_conv_sidebar", type="primary",
                       width="stretch", on_click=_new_conversation)
 
@@ -984,22 +1033,28 @@ def render_sidebar(lang: str) -> tuple[str, bool]:
                 sel = st.selectbox(f"jx_{side}", opts, index=idx, label_visibility="collapsed")
                 st.session_state[f"last_jx_{side}"] = cmp_keys[opts.index(sel)]
 
-        hist = st.session_state.chat_history
-        if hist:
+        items = history_items(st.session_state.chat_history)
+        if items:
             st.divider()
             st.markdown(f'<div class="sidebar-label">{T[lang]["history_label"]}</div>',
                         unsafe_allow_html=True)
             sel_idx = st.session_state.selected_hist_idx
-            active = sel_idx if sel_idx is not None else len(hist) - 1
             with st.container(key="hd_history"):
-                for i in range(len(hist) - 1, -1, -1):
-                    q = hist[i]["question"]
-                    q_short = (q[:46] + "…") if len(q) > 46 else q
-                    marker = "● " if i == active else ""
-                    if st.button(f"{marker}{q_short}", key=f"hist_btn_{i}", type="tertiary",
-                                 width="stretch", help=q):
-                        st.session_state.selected_hist_idx = i
-                        st.rerun()
+                for it in items:
+                    title = it["title"]
+                    short = (title[:40] + "…") if len(title) > 40 else title
+                    if it["kind"] == "conv":
+                        on = (sel_idx is None and not compare
+                              and it["key"] == st.session_state.active_conv)
+                        turns = f"  ({it['turns']})" if it["turns"] > 1 else ""
+                        st.button(f"{'● ' if on else ''}{short}{turns}", key=f"conv_btn_{it['key']}",
+                                  type="tertiary", width="stretch", help=title,
+                                  on_click=_open_conversation, args=(it["key"],))
+                    else:
+                        on = sel_idx == it["key"]
+                        st.button(f"{'● ' if on else ''}⚖️ {short}", key=f"cmp_btn_{it['key']}",
+                                  type="tertiary", width="stretch", help=title,
+                                  on_click=_open_comparison, args=(it["key"],))
             st.button(T[lang]["clear_history"], width="stretch", on_click=_clear_history)
 
         st.divider()
@@ -1087,7 +1142,7 @@ def _run_single(rag: HealdarRAG, q: str, lang: str) -> bool:
         with st.spinner(T[lang]["loading"]):
             t0 = _time.perf_counter()
             result = rag.ask(q, jurisdiction=jx,
-                             history=build_history_context(st.session_state.thread))
+                             history=build_history_context(current_thread()))
             secs = _time.perf_counter() - t0
     except HealdarError as exc:
         show_error(exc, lang)
@@ -1095,8 +1150,8 @@ def _run_single(rag: HealdarRAG, q: str, lang: str) -> bool:
     _analytics.log_query(q, lang, "single", jurisdiction=jx,
                          response_ms=int(secs * 1000), no_context=result.no_context)
     log_session_query(lang, "single", [jx], secs, not result.no_context, result.coverage)
-    entry = {"question": q, "mode": "single", "lang": lang, "jurisdiction": jx, "result": result}
-    st.session_state.thread.append(entry)
+    entry = {"question": q, "mode": "single", "lang": lang, "jurisdiction": jx, "result": result,
+             "conv": st.session_state.active_conv}
     st.session_state.chat_history.append(entry)
     save_session(st.session_state.chat_history)
     return True
@@ -1108,7 +1163,7 @@ def render_thread(rag: HealdarRAG, lang: str) -> None:
     follow-up carries the conversation with it. (Each answer used to replace
     the last, so nobody could tell that follow-ups were possible.)
     """
-    thread = st.session_state.thread
+    thread = current_thread()
     rtl = " hd-rtl" if lang == "ar" else ""
     if not thread:
         question_form(lang, T[lang]["q_placeholder"])

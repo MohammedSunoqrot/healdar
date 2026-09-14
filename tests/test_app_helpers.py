@@ -322,6 +322,34 @@ class TestConversationHelpers(unittest.TestCase):
         self.assertEqual(app.understood_as(RAGAnswer(question="q", answer="a")), "")
 
 
+class TestConversationList(unittest.TestCase):
+    """Earlier conversations stay listed, and picking one up moves it to the top."""
+
+    @staticmethod
+    def _e(q, conv=None, mode="single"):
+        e = {"question": q, "mode": mode}
+        if conv is not None:
+            e["conv"] = conv
+        return e
+
+    def test_turns_group_into_conversations(self):
+        hist = [self._e("retinal class?", 1), self._e("why IIb?", 1), self._e("insulin app?", 2)]
+        self.assertEqual([(i["key"], i["title"], i["turns"]) for i in app.history_items(hist)],
+                         [(2, "insulin app?", 1), (1, "retinal class?", 2)])
+
+    def test_resuming_an_old_conversation_moves_it_up(self):
+        hist = [self._e("a", 1), self._e("b", 2), self._e("a, continued", 1)]
+        self.assertEqual([i["key"] for i in app.history_items(hist)], [1, 2])
+
+    def test_comparisons_are_listed_on_their_own(self):
+        hist = [self._e("a", 1), self._e("compare?", mode="compare")]
+        self.assertEqual([(i["kind"], i["key"]) for i in app.history_items(hist)],
+                         [("compare", 1), ("conv", 1)])
+
+    def test_entries_saved_before_conversation_ids(self):
+        self.assertEqual(app.history_items([self._e("old")])[0]["key"], 0)
+
+
 class TestNonAsciiCitationBrackets(unittest.TestCase):
     """Answers stored before canonicalisation still render and resolve."""
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.1.2 — 2026-09-14
+
+- **Pick up earlier conversations.** Starting a new conversation used to leave the
+  previous one behind: the sidebar listed single questions, and opening one showed a
+  read-only answer. The sidebar now lists conversations — titled by their first
+  question, with the number of turns — and opening one brings back the whole thread
+  with the question box under it. Follow-ups there use that conversation's own context
+  and cited pages, and its jurisdiction is restored. A conversation you pick up again
+  moves to the top of the list; comparisons are listed on their own.
+
 ## 2.1.1 — 2026-09-14
 
 - **Arabic answers read right to left.** Layout followed the interface language, so an
@@ -198,7 +208,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1).
+- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1, 285 in 2.1.2).
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;
