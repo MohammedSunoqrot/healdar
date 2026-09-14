@@ -136,9 +136,31 @@ def _wrap_groq_error(exc: Exception) -> Exception:
     return exc
 
 
+def _head_tail(text: str, limit: int) -> str:
+    """
+    Trim to about `limit` characters keeping both ends. Answers put their
+    conclusion last: keeping only the start once handed a follow-up an answer
+    cut off before "most likely Class IIb", and it went on to argue IIa.
+    """
+    if len(text) <= limit:
+        return text
+    head = limit * 2 // 5
+    return f"{text[:head].rstrip()} [...] {text[-(limit - head):].lstrip()}"
+
+
 _CITE_GROUP = re.compile(
     r"[\[【［]\s*(Sources?\s*\d[^\]】］]*)[\]】］]", re.IGNORECASE
 )
+
+
+# "(Source 4)" and "(Sources 1, 3)": numbers only, so a parenthetical sentence
+# such as "(Source 1 describes the rule)" is never swallowed.
+_CITE_PAREN = re.compile(
+    r"\(\s*(Sources?\s*\d+(?:\s*(?:,|;|and|&)\s*(?:Sources?\s*)?\d+)*)\s*\)",
+    re.IGNORECASE,
+)
+# What is left: "Source 6 lists two exceptions", "(Source 1 §1.4)".
+_BARE_SOURCE = re.compile(r"\bSource\s+(\d+)\b")
 
 
 def canonical_citations(text: str) -> str:
@@ -157,7 +179,14 @@ def canonical_citations(text: str) -> str:
                 nums.append(found.group(1))
         return "".join(f"[Source {n}]" for n in dict.fromkeys(nums)) or m.group(0)
 
-    return _CITE_GROUP.sub(repl, text)
+    text = _CITE_PAREN.sub(repl, _CITE_GROUP.sub(repl, text))
+    # A bare mention keeps its wording and gains the clickable reference:
+    # "Source 6 lists ..." -> "Source [Source 6] lists ...", shown as "Source [6]".
+    # The space matters: Arabic translation swaps the tag for a placeholder
+    # token, and "SourceCITE6REF" would not survive as one.
+    parts = re.split(r"(\[Source \d+\])", text)
+    parts[::2] = [_BARE_SOURCE.sub(r"Source [Source \1]", p) for p in parts[::2]]
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +207,10 @@ class RAGAnswer:
     # "full" | "partial" -- the model's own assessment of context sufficiency
     coverage:      str = "full"
     model:         str = ""
+    # The question as searched: a follow-up rewritten to stand on its own.
+    search_question: str = ""
+    # Suggested next questions, in the answer's language.
+    followups:     list[str] = field(default_factory=list)
 
     @property
     def is_weak(self) -> bool:
@@ -295,8 +328,10 @@ class HealdarRAG:
         Args:
             question:     the user's question, English or Arabic.
             jurisdiction: a key of JURISDICTION_MAP.
-            history:      recent turns as [{"question_en", "answer_en"}], used
-                          to resolve follow-up questions.
+            history:      recent turns of this conversation as
+                          [{"question_en", "answer_en", "sources"}], used to
+                          understand follow-ups and to build on the pages the
+                          previous answer cited.
         """
         jurisdiction = (jurisdiction or "all").lower().strip()
         if jurisdiction not in JURISDICTION_MAP:
@@ -308,9 +343,22 @@ class HealdarRAG:
         in_arabic = self._is_arabic(question)
         question_en = self._translate_to_english(question) if in_arabic else question
 
-        search_query = (
-            self._maybe_reformulate(question_en, history) if history else question_en
-        )
+        history = [
+            h for h in (history or []) if h.get("question_en") and h.get("answer_en")
+        ][-config.HISTORY_TURNS:]
+
+        # In a conversation, one planning call both rewrites the follow-up to
+        # stand alone ("why IIb?" -> "why would this retinal software be Class
+        # IIb under the EU MDR?") and plans its searches. The rewrite comes
+        # first because it is what the relevance gate must judge: "why IIb?"
+        # on its own matches nothing.
+        planned: list[str] | None = None
+        if history and config.QUERY_PLANNING:
+            search_query, planned = self._plan_followup(question_en, history, jurisdiction)
+        elif history:
+            search_query = self._maybe_reformulate(question_en, history)
+        else:
+            search_query = question_en
 
         jx_tags = JURISDICTION_MAP[jurisdiction]
         plan_jx = jurisdiction
@@ -325,8 +373,9 @@ class HealdarRAG:
             # Only a question that passes the relevance gate on its own is
             # worth planning for -- and planned queries must never be what
             # lets an off-topic question through.
-            planned = self._plan_queries(search_query, plan_jx) if found else []
-            if planned:
+            if found and planned is None:
+                planned = self._plan_queries(search_query, plan_jx)
+            if found and planned:
                 found = self._retriever.search_many([search_query, *planned], jx_tags)
         except HealdarError:
             raise
@@ -348,19 +397,28 @@ class HealdarRAG:
                 quality=found.quality,
                 best_distance=found.best_distance,
                 model=self.answer_model,
+                search_question=search_query,
             )
 
-        # One passage per source page: same-page chunks are merged so that the
-        # prompt, the sources list and the UI share a single numbering scheme.
-        passages = self._merge_by_page(found.passages)
+        # The pages the previous answer cited come first, so "why Class IIb?"
+        # is answered from the same Rule 11 page rather than whatever a fresh
+        # search returns. Then one passage per source page: same-page chunks
+        # are merged so that the prompt, the sources list and the UI share a
+        # single numbering scheme.
+        carried = self._carried_passages(history, jx_tags)
+        passages = self._merge_by_page([*carried, *found.passages])
 
-        prompt = self._build_prompt(question_en, passages, history=history)
+        prompt = self._build_prompt(
+            question_en, passages, history=history, search_question=search_query
+        )
         raw_answer = self._generate(prompt)
         english_answer, coverage = self._extract_coverage(canonical_citations(raw_answer))
+        english_answer, followups_en = self._extract_followups(english_answer)
 
-        answer_text = (
-            self._translate_to_arabic(english_answer) if in_arabic else english_answer
-        )
+        if in_arabic:
+            answer_text, followups = self._to_arabic(english_answer, followups_en)
+        else:
+            answer_text, followups = english_answer, followups_en
 
         return RAGAnswer(
             question=question,
@@ -372,6 +430,8 @@ class HealdarRAG:
             best_distance=found.best_distance,
             coverage=coverage,
             model=self.answer_model,
+            search_question=search_query,
+            followups=followups,
         )
 
     def ask_many(
@@ -497,6 +557,44 @@ class HealdarRAG:
         for token, original in placeholders.items():
             translated = translated.replace(token, original)
         return translated
+
+    def _to_arabic(self, answer_en: str, followups_en: list[str]) -> tuple[str, list[str]]:
+        """Translate the answer and its suggested follow-ups, concurrently."""
+        if not followups_en:
+            return self._translate_to_arabic(answer_en), []
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            answer = pool.submit(self._translate_to_arabic, answer_en)
+            followups = pool.submit(self._translate_followups_ar, followups_en)
+            return answer.result(), followups.result()
+
+    def _translate_followups_ar(self, questions: list[str]) -> list[str]:
+        """
+        Suggested follow-ups in Arabic. On any failure or count mismatch, offer
+        none: English suggestions under an Arabic answer read as a glitch.
+        """
+        try:
+            raw = self._chat(
+                model=config.GROQ_MODEL_SMALL,
+                content=(
+                    "Translate each English question below into Arabic. Keep "
+                    "technical names (FDA, MDR, IVDR, AI Act, SaMD, SFDA, SDAIA, "
+                    "IMDRF, ISO) in English. Output one translated question per "
+                    "line, in the same order, and nothing else.\n\n"
+                    + "\n".join(questions)
+                ),
+                temperature=0,
+                # Reasoning counts against this budget; the 20b model needs headroom.
+                max_tokens=1500,
+            )
+        except Exception as exc:
+            logger.warning("Follow-up translation failed: %s", exc)
+            return []
+        lines = [
+            re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+            for line in (raw or "").splitlines()
+            if line.strip()
+        ]
+        return lines if len(lines) == len(questions) else []
 
     # ------------------------------------------------------------------
     # Follow-up questions
@@ -625,6 +723,103 @@ class HealdarRAG:
             logger.info("Planned queries for %r: %s", question_en, out)
         return out
 
+    _FOLLOWUP_PROMPT = (
+        "You are helping search a library of official health-AI regulatory "
+        "documents (EU MDR, IVDR, AI Act and MDCG guidance; US FDA guidance; "
+        "Saudi SFDA, SDAIA and NHIC; UAE and Qatar regulators; WHO; IMDRF).\n\n"
+        "CONVERSATION SO FAR:\n{history}\n\n"
+        "NEW MESSAGE{jx}: {question}\n\n"
+        "First rewrite the new message as one complete, standalone question that "
+        "carries everything it depends on from the conversation: the product, "
+        "the jurisdiction and the point under discussion. If it does not depend "
+        "on the conversation, repeat it unchanged -- never add a topic the user "
+        "did not raise.\n"
+        "Then write {n} search queries for that question, worded the way the "
+        "regulation or guidance itself would be worded: name the regulatory "
+        "concept and its deciding criteria rather than guessing article or rule "
+        "numbers.\n\n"
+        "Reply in exactly this format, with nothing else:\n"
+        "QUESTION: <the standalone question>\n"
+        "<search query>\n<search query>\n<search query>"
+    )
+
+    def _plan_followup(
+        self, question_en: str, history: list[dict], jurisdiction: str = "all"
+    ) -> tuple[str, list[str]]:
+        """
+        Rewrite a follow-up to stand alone and plan its searches, in one call.
+
+        This replaces the keyword test for follow-ups ("it", "this",
+        "compare"...), which missed "why IIb and not IIa?" and rewrote new,
+        unrelated questions against stale history. If the call fails, the older
+        rewrite runs instead, so a follow-up is never searched as a fragment.
+        """
+        turns = []
+        for h in history[-2:]:
+            answer = config.CITATION_RE.sub("", h.get("answer_en", "")).strip()
+            turns.append(f"User: {h['question_en']}\nAssistant: {_head_tail(answer, 900)}")
+        label = self._JX_LABEL.get(jurisdiction)
+        try:
+            raw = self._chat(
+                model=config.GROQ_MODEL_PLANNER,
+                content=self._FOLLOWUP_PROMPT.format(
+                    history="\n\n".join(turns),
+                    jx=f" (jurisdiction: {label})" if label else "",
+                    question=question_en,
+                    n=config.PLANNED_QUERIES,
+                ),
+                temperature=0,
+                max_tokens=1500,
+            )
+        except Exception as exc:
+            logger.warning("Follow-up planning failed, rewriting only: %s", exc)
+            return self._maybe_reformulate(question_en, history), []
+        return self._parse_followup_plan(raw, question_en)
+
+    @classmethod
+    def _parse_followup_plan(cls, raw: str, question_en: str) -> tuple[str, list[str]]:
+        standalone, found_q, rest = question_en, False, []
+        for line in (raw or "").splitlines():
+            m = re.match(r"^\s*[*_#>\-\s]*QUESTION\s*[:\-]\s*(.+)$", line, re.IGNORECASE)
+            if m:
+                # Shown to the reader as "Understood as: ...", so no Markdown.
+                candidate = re.sub(r"\*\*|__", "", m.group(1))
+                candidate = candidate.strip().strip("*_\"'“”").strip()
+                if not found_q and 3 <= len(candidate) <= 500:
+                    standalone, found_q = candidate, True
+                continue
+            rest.append(line)
+        if standalone != question_en:
+            logger.info("Follow-up %r understood as %r", question_en, standalone)
+        return standalone, cls._parse_planned("\n".join(rest), standalone)
+
+    @staticmethod
+    def _carried_passages(history: list[dict], jx_tags: list[str]) -> list[Passage]:
+        """The pages the previous answer cited, where they fall within this search."""
+        if not history or config.CARRY_SOURCES <= 0:
+            return []
+        last = history[-1]
+        sources = last.get("sources") or []
+        cited = dict.fromkeys(int(n) for n in config.CITATION_RE.findall(last.get("answer_en", "")))
+        out: list[Passage] = []
+        for n in cited:
+            if not 1 <= n <= len(sources):
+                continue
+            s = sources[n - 1]
+            if not s.get("text") or (jx_tags and s.get("jurisdiction") not in jx_tags):
+                continue
+            out.append(Passage(
+                chunk_id=f"{s.get('filename')}::p{s.get('page_number')}::carried",
+                text=str(s["text"]),
+                filename=str(s.get("filename", "unknown")),
+                jurisdiction=str(s.get("jurisdiction", "unknown")),
+                page_number=int(s.get("page_number", 0)),
+                distance=1.0 - float(s.get("relevance") or 0.0),
+            ))
+            if len(out) >= config.CARRY_SOURCES:
+                break
+        return out
+
     # ------------------------------------------------------------------
     # Prompting
     # ------------------------------------------------------------------
@@ -657,6 +852,7 @@ class HealdarRAG:
         question: str,
         passages: list[Passage],
         history: list[dict] | None = None,
+        search_question: str | None = None,
     ) -> str:
         context = "\n\n".join(
             f"[Source {i}] ({p.jurisdiction})\n{p.text}"
@@ -665,15 +861,28 @@ class HealdarRAG:
 
         history_section = ""
         if history:
+            recent = history[-config.HISTORY_TURNS:]
             turns = []
-            for h in history[-config.HISTORY_TURNS:]:
-                answer = h.get("answer_en", "")
-                snippet = answer[:300] + ("..." if len(answer) > 300 else "")
+            for i, h in enumerate(recent):
+                # The latest answer nearly in full -- a follow-up usually argues
+                # with its reasoning -- and older ones briefly. Old citation
+                # numbers are stripped: they point into a different source list.
+                limit = config.HISTORY_ANSWER_CHARS if i == len(recent) - 1 else 400
+                answer = config.CITATION_RE.sub("", h.get("answer_en", ""))
+                answer = re.sub(r"[ \t]+([.,;:])", r"\1", answer).strip()
+                snippet = _head_tail(answer, limit)
                 turns.append(f"User: {h.get('question_en', '')}\nAssistant: {snippet}")
             history_section = (
-                "CONVERSATION HISTORY (background only -- do NOT cite sources "
-                "from previous turns):\n" + "\n\n".join(turns) + "\n\n"
+                "CONVERSATION HISTORY (the question below may follow up on this -- "
+                "answer it in that context, but cite only the CONTEXT passages, "
+                "which include the pages earlier answers relied on):\n"
+                + "\n\n".join(turns) + "\n\n"
             )
+        understood = (
+            f"(In full: {search_question})\n"
+            if search_question and search_question.strip() != question.strip()
+            else ""
+        )
 
         return (
             "You are Healdar, an expert assistant on health-AI regulatory "
@@ -706,7 +915,9 @@ class HealdarRAG:
             "missing and how it could change the answer.\n\n"
             "Rules:\n"
             "- Cite with the short tag only, e.g. [Source 1]. Never put "
-            "filenames, paths or page numbers inside the brackets.\n"
+            "filenames, paths or page numbers inside the brackets, and always "
+            "use square brackets -- never '(Source 1)' or a bare 'Source 1' in "
+            "a sentence.\n"
             "- Cite the specific source for each substantive claim and for each "
             "rule used in your reasoning.\n"
             "- Quote the regulation's own wording for requirements, and name "
@@ -718,12 +929,18 @@ class HealdarRAG:
             "simple '- ' bullet lists or '1.' numbered lists where they help. "
             "Do NOT use tables, headings, horizontal rules, or bold/italic "
             "markup; the answer is shown as plain formatted text.\n"
+            "- After the answer, write a line reading 'FOLLOW-UPS:' and then 2 or "
+            "3 short questions the user might naturally ask next about their "
+            "situation, one per line starting with '- '. Make them specific to "
+            "this answer and answerable from regulatory documents (for example "
+            "what would change the conclusion, or how another jurisdiction "
+            "treats the same product).\n"
             "- Finish with a final line, on its own, reading exactly "
             "'COVERAGE: full' if the passages were enough to answer (including "
             "by applying their rules to the case), or 'COVERAGE: partial' if "
             "something essential was missing.\n\n"
             f"CONTEXT:\n{context}\n\n"
-            f"QUESTION: {question}\n\n"
+            f"QUESTION: {question}\n{understood}\n"
             "ANSWER:"
         )
 
@@ -745,6 +962,33 @@ class HealdarRAG:
             coverage = "partial" if found in {"partial", "none"} else "full"
             answer = (answer[:match.start()] + answer[match.end():])
         return answer.strip(), coverage
+
+    # Only a line that is the heading and nothing else: "Follow-up monitoring
+    # is required ..." in the body must never be mistaken for it.
+    _FOLLOWUPS_RE = re.compile(
+        r"^\s*[*_#>\s]*(?:suggested\s+)?follow[\s\-‐-―]?ups?(?:\s+questions)?"
+        r"\s*[*_]*\s*:?\s*[*_]*\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    @classmethod
+    def _extract_followups(cls, answer: str) -> tuple[str, list[str]]:
+        """Pull the trailing FOLLOW-UPS block off the answer. Returns (text, questions)."""
+        matches = list(cls._FOLLOWUPS_RE.finditer(answer))
+        if not matches:
+            return answer, []
+        match = matches[-1]
+        items: list[str] = []
+        for line in answer[match.end():].splitlines():
+            # gpt-oss often doubles the bullet ("- - What if ...").
+            q = re.sub(r"^\s*(?:(?:[-*•]|\d+[.)])\s*)+", "", line)
+            q = config.CITATION_RE.sub("", q).strip().strip("*_\"'“”").strip()
+            if 8 <= len(q) <= 200 and q not in items:
+                items.append(q)
+        # ... and puts a horizontal rule above the block.
+        body = re.sub(r"(?:\n[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*)+$", "",
+                      answer[:match.start()].rstrip())
+        return body.rstrip(), items[:3]
 
     # ------------------------------------------------------------------
     # Groq

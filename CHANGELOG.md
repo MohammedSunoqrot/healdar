@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.1.0 — 2026-09-14
+
+Follow-up conversations.
+
+- **Answers stack as a conversation.** Each answer used to replace the previous one, so
+  nobody could tell that follow-ups were possible. Turns now stay on the page, the
+  question box sits under the latest answer, and **New conversation** starts fresh. A
+  question opened from the sidebar history shows on its own, with a way back.
+- **Follow-ups are understood in context.** "Why that class and not a lower one?" is
+  rewritten to stand alone by the same model call that plans the searches, and the
+  rewrite is shown under the question (*Understood as: …*). It replaces a keyword test
+  ("it", "this", "compare"…) that missed real follow-ups and rewrote unrelated new
+  questions against stale history. Refusal is still decided on the rewritten question,
+  so an off-topic follow-up is refused as before.
+- **Follow-ups build on the previous answer.** The pages it cited are carried into the
+  new evidence, and the model sees the previous answer's opening *and* conclusion. It
+  used to see the first 300 characters — once cutting off "most likely Class IIb", after
+  which the follow-up argued the software was Class IIa.
+- **Suggested follow-ups.** Each answer offers two or three next questions (what would
+  change the conclusion, how another jurisdiction treats the same product); one click
+  asks them. In Arabic they are translated, or left out if translation fails.
+- **Citations in any form are linked.** "(Source 4)" and a bare "Source 6 lists …" showed
+  as plain text with no reference behind them, and one answer lost its reference list
+  entirely. Both now link like "[Source 4]", keeping their wording.
+- Blockquoted rule text no longer shows a literal ">"; sidebar history and suggested
+  questions are left-aligned lists.
+
 ## 2.0.0 — 2026-09-13
 
 A reliability and usability release. Two faults had already taken the deployed app down,
@@ -155,7 +182,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 244.
+- Tests: 48 → 244 (268 in 2.1.0).
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

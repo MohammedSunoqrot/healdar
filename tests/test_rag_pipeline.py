@@ -479,6 +479,136 @@ class TestNamedJurisdiction(unittest.TestCase):
         self.assertEqual(rag._retriever.search.call_args[0][1], rp.JURISDICTION_MAP["sfda"])
 
 
+class TestFollowUps(unittest.TestCase):
+    """Follow-ups: rewritten to stand alone, and built on the pages already cited."""
+
+    HISTORY = [{
+        "question_en": "Suggest the class of my retinal screening software under the EU MDR.",
+        "answer_en": "Most likely Class IIb under Rule 11 [Source 2]. It is software [Source 1].",
+        "sources": [
+            {"filename": "FAQ.pdf", "jurisdiction": "EU_MDCG", "page_number": 5,
+             "text": "faq text", "relevance": 0.5},
+            {"filename": "MDCG_2019-11.pdf", "jurisdiction": "EU_MDCG", "page_number": 18,
+             "text": "Rule 11 text", "relevance": 0.7},
+            {"filename": "Uncited.pdf", "jurisdiction": "EU_MDCG", "page_number": 3,
+             "text": "uncited", "relevance": 0.6},
+        ],
+    }]
+    STANDALONE = "Why would the retinal software be Class IIb rather than IIa under the EU MDR?"
+
+    def test_parse_plan_takes_question_and_queries(self):
+        raw = f"QUESTION: {self.STANDALONE}\nRule 11 serious deterioration\nMDCG 2019-11 examples"
+        q, planned = HealdarRAG._parse_followup_plan(raw, "why IIb?")
+        self.assertEqual(q, self.STANDALONE)
+        self.assertEqual(planned, ["Rule 11 serious deterioration", "MDCG 2019-11 examples"])
+
+    def test_parse_plan_without_question_line_keeps_the_original(self):
+        q, planned = HealdarRAG._parse_followup_plan("Rule 11 criteria", "why IIb?")
+        self.assertEqual(q, "why IIb?")
+        self.assertEqual(planned, ["Rule 11 criteria"])
+
+    def test_parse_plan_accepts_markup(self):
+        q, _ = HealdarRAG._parse_followup_plan("**QUESTION:** Is it Class III?", "and III?")
+        self.assertEqual(q, "Is it Class III?")
+
+    def test_parse_plan_strips_markdown_from_the_question(self):
+        q, _ = HealdarRAG._parse_followup_plan(
+            "QUESTION: How would a **definitive diagnosis** change it?", "and if?")
+        self.assertEqual(q, "How would a definitive diagnosis change it?")
+
+    def test_carried_passages_are_the_cited_ones(self):
+        carried = HealdarRAG._carried_passages(self.HISTORY, [])
+        self.assertEqual([p.filename for p in carried], ["MDCG_2019-11.pdf", "FAQ.pdf"])
+        self.assertAlmostEqual(carried[0].distance, 0.3)
+
+    def test_carried_passages_respect_the_jurisdiction(self):
+        self.assertEqual(HealdarRAG._carried_passages(self.HISTORY, ["KSA_SFDA"]), [])
+
+    def test_extract_followups(self):
+        text = ("Answer body [Source 1].\n\nFOLLOW-UPS:\n- What if it acts autonomously?\n"
+                "- How does SFDA classify it? [Source 2]\n")
+        body, followups = HealdarRAG._extract_followups(text)
+        self.assertEqual(body, "Answer body [Source 1].")
+        self.assertEqual(followups, ["What if it acts autonomously?", "How does SFDA classify it?"])
+
+    def test_extract_followups_with_markup_and_a_cap(self):
+        text = ("Body.\n**Suggested follow-ups:**\n1. First question here?\n"
+                "2. Second question here?\n3. Third question here?\n4. Fourth question here?")
+        body, followups = HealdarRAG._extract_followups(text)
+        self.assertEqual(body, "Body.")
+        self.assertEqual(len(followups), 3)
+
+    def test_body_mentioning_follow_up_is_untouched(self):
+        text = "Follow-up monitoring is required after market entry [Source 1]."
+        self.assertEqual(HealdarRAG._extract_followups(text), (text, []))
+
+    def test_extract_followups_as_gpt_oss_writes_them(self):
+        # Seen live: a non-breaking hyphen, doubled bullets, a rule above.
+        text = ("Body [Source 1].\n\n---\n\nFOLLOW‑UPS:\n"
+                "- - What if it is coupled with a pump?\n- - Which PMS duties apply?\n")
+        body, followups = HealdarRAG._extract_followups(text)
+        self.assertEqual(body, "Body [Source 1].")
+        self.assertEqual(followups, ["What if it is coupled with a pump?", "Which PMS duties apply?"])
+
+    def test_extract_followups_bold_heading_without_colon(self):
+        body, followups = HealdarRAG._extract_followups("Body.\n\n**FOLLOW-UPS**\n- Is it Class III then?")
+        self.assertEqual((body, followups), ("Body.", ["Is it Class III then?"]))
+
+    def test_history_keeps_the_conclusion_of_a_long_answer(self):
+        long_answer = "Rule 11 analysis step. " * 300 + "Conclusion: most likely Class IIb."
+        prompt = _bare_rag()._build_prompt(
+            "why?", TestBuildPrompt.PASSAGES,
+            history=[{"question_en": "Which class?", "answer_en": long_answer}],
+        )
+        self.assertIn("most likely Class IIb", prompt)
+        self.assertLess(len(prompt), len(long_answer))
+
+    def test_history_in_prompt_drops_old_citation_numbers(self):
+        prompt = _bare_rag()._build_prompt("why IIb?", TestBuildPrompt.PASSAGES,
+                                           history=self.HISTORY, search_question=self.STANDALONE)
+        history_part = prompt.split("CONTEXT:")[0]
+        self.assertIn("Most likely Class IIb under Rule 11.", history_part)
+        self.assertNotIn("[Source 2]", history_part)
+        self.assertIn(f"(In full: {self.STANDALONE})", prompt)
+
+    def _rag(self, chat_replies, first):
+        from unittest import mock
+        rag = _bare_rag()
+        rag.answer_model = "answer-model"
+        rag._retriever = mock.MagicMock()
+        rag._retriever.search.return_value = first
+        rag._retriever.search_many.return_value = RetrievalResult(
+            [_passage(text="Rule 11 exceptions", fname="MDCG_2019-11.pdf", jx="EU_MDCG", page=19)]
+        )
+        rag._chat = mock.MagicMock(side_effect=list(chat_replies))
+        return rag
+
+    def test_follow_up_end_to_end(self):
+        rag = self._rag(
+            [f"QUESTION: {self.STANDALONE}\nRule 11 serious deterioration",
+             "A missed referral can cause serious deterioration [Source 1].\n"
+             "FOLLOW-UPS:\n- What evidence does a Class IIb device need?\nCOVERAGE: full"],
+            RetrievalResult([_passage(text="faq", jx="EU_MDCG")]),
+        )
+        answer = rag.ask("why IIb and not IIa?", "all", history=self.HISTORY)
+        search_args = rag._retriever.search.call_args[0]
+        self.assertEqual(search_args[0], self.STANDALONE)                 # gate judges the rewrite
+        self.assertEqual(search_args[1], rp.JURISDICTION_MAP["eu"])      # ... which names the EU
+        self.assertEqual(answer.search_question, self.STANDALONE)
+        self.assertEqual(answer.followups, ["What evidence does a Class IIb device need?"])
+        self.assertEqual((answer.sources[0]["filename"], answer.sources[0]["page_number"]),
+                         ("MDCG_2019-11.pdf", 18))                         # carried forward, first
+        self.assertEqual(rag._chat.call_count, 2)                          # plan + answer only
+
+    def test_off_topic_follow_up_still_refused(self):
+        rag = self._rag(["QUESTION: How do I bake sourdough bread?"],
+                        RetrievalResult([], quality="no_match"))
+        answer = rag.ask("how do I bake sourdough bread?", "all", history=self.HISTORY)
+        self.assertTrue(answer.no_context)
+        rag._retriever.search_many.assert_not_called()
+        self.assertEqual(rag._chat.call_count, 1)
+
+
 class TestPromptAllowsReasoning(unittest.TestCase):
     """The model should apply the rules it is given, not refuse to conclude."""
 
@@ -515,8 +645,29 @@ class TestCanonicalCitations(unittest.TestCase):
                          "[Source 1]")
 
     def test_other_brackets_untouched(self):
-        text = "See [1] and 【note】 and (Source 2)."
+        # "(Source 2)" is converted on purpose (test_parenthesised_citations).
+        text = "See [1] and 【note】 and (see Annex VIII)."
         self.assertEqual(rp.canonical_citations(text), text)
+
+    def test_parenthesised_citations(self):
+        # Seen live: "(Source 4)" left the answer with no reference list.
+        self.assertEqual(rp.canonical_citations("is Class IIa (Source 4)."),
+                         "is Class IIa [Source 4].")
+        self.assertEqual(rp.canonical_citations("(Sources 1, 3)"), "[Source 1][Source 3]")
+
+    def test_bare_mentions_are_linked_not_dropped(self):
+        # Seen live: "Source 6 lists two exceptions" and "(Source 1 §1.4)"
+        # showed as plain text with no reference behind them.
+        self.assertEqual(rp.canonical_citations("Source 6 lists two exceptions."),
+                         "Source [Source 6] lists two exceptions.")
+        self.assertEqual(rp.canonical_citations("(Source 1 §1.4)"), "(Source [Source 1] §1.4)")
+        self.assertEqual(rp.canonical_citations("(Source 1 describes the rule)"),
+                         "(Source [Source 1] describes the rule)")
+
+    def test_linking_is_idempotent(self):
+        once = rp.canonical_citations("Source 6 lists [Source 2].")
+        self.assertEqual(once, "Source [Source 6] lists [Source 2].")
+        self.assertEqual(rp.canonical_citations(once), once)
 
     def test_shared_regex_matches_all_styles(self):
         found = config.CITATION_RE.findall("[Source 1] 【Source 2】 ［Source 3］")

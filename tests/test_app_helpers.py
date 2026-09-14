@@ -299,6 +299,29 @@ class TestBuildHistoryContext(unittest.TestCase):
         self.assertEqual([r["question_en"] for r in result], ["q2", "q3", "q4"])
 
 
+class TestConversationHelpers(unittest.TestCase):
+    """What a follow-up carries, and what the reader is shown about it."""
+
+    def test_history_passes_sources_for_carrying_forward(self):
+        result = _make_result(q_en="q", a_en="a [Source 1]")
+        result.sources = [{"filename": "A.pdf"}]
+        ctx = app.build_history_context([{"mode": "single", "result": result}])
+        self.assertEqual(ctx[0]["sources"], [{"filename": "A.pdf"}])
+
+    def test_rewritten_follow_up_is_shown(self):
+        r = RAGAnswer(question="why IIb?", answer="a", question_en="why IIb?",
+                      search_question="Why would the retinal software be Class IIb?")
+        self.assertEqual(app.understood_as(r), "Why would the retinal software be Class IIb?")
+
+    def test_unchanged_question_shows_nothing(self):
+        r = RAGAnswer(question="What is MDR?", answer="a", question_en="What is MDR?",
+                      search_question="what is MDR?")
+        self.assertEqual(app.understood_as(r), "")
+
+    def test_results_saved_before_the_field_existed(self):
+        self.assertEqual(app.understood_as(RAGAnswer(question="q", answer="a")), "")
+
+
 class TestNonAsciiCitationBrackets(unittest.TestCase):
     """Answers stored before canonicalisation still render and resolve."""
 

@@ -73,7 +73,9 @@ def parse_blocks(text: str) -> list[Block]:
 
     in_code = False
     for raw in (text or "").replace("\r\n", "\n").split("\n"):
-        line = raw.strip()
+        # Blockquote markers ("> Software intended to ...") showed as a literal
+        # ">"; the quote marks inside already say it is quoted text.
+        line = re.sub(r"^(?:>\s?)+", "", raw.strip()).strip()
 
         # Code fences: keep the content, drop the fence.
         if line.startswith("```"):

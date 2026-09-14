@@ -135,6 +135,18 @@ class TestPdfSafety(unittest.TestCase):
         self.assertIsNone(re.search(r"\*\*", out))
 
 
+class TestBlockquotes(unittest.TestCase):
+    """Seen live: a quoted rule rendered with a literal ">" in front of it."""
+
+    def test_quote_marker_dropped(self):
+        out = fmt.to_html("> “Software intended to provide information” is class IIa.")
+        self.assertNotIn("&gt;", out)
+        self.assertIn("Software intended to provide information", out)
+
+    def test_nested_marker_dropped_in_plain_text(self):
+        self.assertEqual(fmt.to_plain(">> quoted rule"), "quoted rule")
+
+
 class TestListContinuity(unittest.TestCase):
     """Blank lines between items used to restart every numbered item at 1."""
 

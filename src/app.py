@@ -159,6 +159,11 @@ T = {
         "corpus_line":    "{docs} official documents · {bodies} regulators",
         "developed_by":   "Developed by",
         "sources_meta":   "{n} cited sources",
+        "followup_placeholder": "Ask a follow-up, e.g. what if the software works without a clinician?",
+        "new_conversation": "✚ New conversation",
+        "suggested":      "Suggested follow-ups",
+        "understood_as":  "Understood as",
+        "back_to_thread": "← Back to the conversation",
     },
     "ar": {
         "tagline":        "الذكاء التنظيمي للذكاء الاصطناعي الصحي",
@@ -213,6 +218,11 @@ T = {
         "corpus_line":    "{docs} وثيقة رسمية · {bodies} جهة تنظيمية",
         "developed_by":   "تطوير",
         "sources_meta":   "{n} مصادر مستشهد بها",
+        "followup_placeholder": "اطرح سؤال متابعة، مثلاً: ماذا لو عمل البرنامج دون تدخل الطبيب؟",
+        "new_conversation": "✚ محادثة جديدة",
+        "suggested":      "أسئلة متابعة مقترحة",
+        "understood_as":  "فُهم السؤال على أنه",
+        "back_to_thread": "→ العودة إلى المحادثة",
     },
 }
 
@@ -279,6 +289,12 @@ _CSS = """
 .hd-badge { display:inline-flex; align-items:center; gap:.35rem; padding:.22rem .8rem;
   border-radius:999px; font-size:.78rem; font-weight:700; color:#fff; }
 .hd-meta { font-size:.72rem; opacity:.6; }
+.hd-understood { display:block; margin-top:.3rem; font-size:.76rem; font-weight:400; opacity:.72; }
+/* Question lists read as lists: left-aligned, not centred button captions.
+   Keyed containers give a stable class; Streamlit's own button markup is not. */
+.st-key-hd_history button, .st-key-hd_history button *,
+.st-key-hd_followups button, .st-key-hd_followups button * {
+  justify-content:flex-start !important; text-align:left !important; }
 .hd-body p { margin:0 0 .75rem; }
 .hd-body ul, .hd-body ol { margin:0 0 .85rem; padding-inline-start:1.4rem; }
 .hd-body li { margin-bottom:.35rem; }
@@ -365,7 +381,7 @@ def inject_css() -> None:
 # ---------------------------------------------------------------------------
 # Cached resources
 # ---------------------------------------------------------------------------
-_RAG_VERSION = "8"   # bump to invalidate st.cache_resource after pipeline changes
+_RAG_VERSION = "9"   # bump to invalidate st.cache_resource after pipeline changes
 
 
 @st.cache_resource(show_spinner=False)
@@ -488,9 +504,10 @@ def select_cited_sources(answer: str, sources: list[dict]) -> list[tuple[int, di
 
 
 def build_history_context(chat_history: list) -> list[dict] | None:
-    """Last 3 single-mode turns (English text) as context for follow-up questions."""
+    """Last 3 single-mode turns (English text, with each answer's sources) for follow-ups."""
     single = [
-        {"question_en": e["result"].question_en, "answer_en": e["result"].answer_en}
+        {"question_en": e["result"].question_en, "answer_en": e["result"].answer_en,
+         "sources": e["result"].sources}
         for e in chat_history
         if e.get("mode") == "single"
         and e["result"].question_en
@@ -543,9 +560,19 @@ def _docx_bytes(question, answer, sources, jx_label, lang) -> bytes:
 # ---------------------------------------------------------------------------
 # Rendering
 # ---------------------------------------------------------------------------
-def render_question_bubble(question: str, lang: str) -> None:
+def understood_as(result: RAGAnswer) -> str:
+    """The rewritten question behind a follow-up, when it differs from what was typed."""
+    searched = (getattr(result, "search_question", "") or "").strip()
+    asked = (result.question_en or result.question or "").strip()
+    return searched if searched and searched.lower() != asked.lower() else ""
+
+
+def render_question_bubble(question: str, lang: str, understood: str = "") -> None:
     rtl = " hd-rtl" if lang == "ar" else ""
-    st.markdown(f'<div class="hd-q{rtl}">🔍 {_html.escape(question)}</div>',
+    # A rewritten follow-up is shown, so the reader can see what was searched.
+    extra = (f'<span class="hd-understood">{_html.escape(T[lang]["understood_as"])}: '
+             f'<span dir="ltr">{_html.escape(understood)}</span></span>' if understood else "")
+    st.markdown(f'<div class="hd-q{rtl}">🔍 {_html.escape(question)}{extra}</div>',
                 unsafe_allow_html=True)
 
 
@@ -816,6 +843,7 @@ def init_state() -> None:
             last = persisted[-1]
             if last.get("mode") == "single":
                 st.session_state["last_result"] = last["result"]
+                st.session_state["thread"] = [last]
                 st.session_state["used_jx"] = last.get("jurisdiction")
             elif last.get("mode") == "compare":
                 st.session_state["last_result_l"] = last["result_l"]
@@ -824,7 +852,8 @@ def init_state() -> None:
                 st.session_state["used_jx_r"] = last.get("jx_r")
 
     defaults: dict = {
-        "lang": "en", "compare": False, "q_input": "", "auto_submit": False,
+        "lang": "en", "compare": False, "q_input": "", "pending_q": None,
+        "scroll_latest": False, "thread": [],
         "last_jx": "all", "last_result": None,
         "last_jx_l": "sfda", "last_jx_r": "eu",
         "last_result_l": None, "last_result_r": None,
@@ -837,9 +866,27 @@ def init_state() -> None:
 
 
 def _ask_starter(question: str) -> None:
-    """Starter buttons ask directly instead of only filling the box."""
-    st.session_state.q_input = question
-    st.session_state.auto_submit = True
+    """Starter and suggested follow-up buttons ask directly."""
+    st.session_state.pending_q = question
+    st.session_state.selected_hist_idx = None
+
+
+def _on_submit() -> None:
+    """Queue the typed question and empty the box, ready for a follow-up."""
+    q = st.session_state.get("q_input", "").strip()
+    if q:
+        st.session_state.pending_q = q
+        st.session_state.selected_hist_idx = None
+    st.session_state.q_input = ""
+
+
+def _new_conversation() -> None:
+    st.session_state.thread = []
+    st.session_state.selected_hist_idx = None
+
+
+def _back_to_thread() -> None:
+    st.session_state.selected_hist_idx = None
 
 
 def _clear_history() -> None:
@@ -847,6 +894,7 @@ def _clear_history() -> None:
                 "used_jx", "used_jx_l", "used_jx_r", "selected_hist_idx"):
         st.session_state[key] = None
     st.session_state.chat_history = []
+    st.session_state.thread = []
     save_session([])
 
 
@@ -901,14 +949,15 @@ def render_sidebar(lang: str) -> tuple[str, bool]:
                         unsafe_allow_html=True)
             sel_idx = st.session_state.selected_hist_idx
             active = sel_idx if sel_idx is not None else len(hist) - 1
-            for i in range(len(hist) - 1, -1, -1):
-                q = hist[i]["question"]
-                q_short = (q[:46] + "…") if len(q) > 46 else q
-                marker = "● " if i == active else ""
-                if st.button(f"{marker}{q_short}", key=f"hist_btn_{i}", type="tertiary",
-                             width="stretch", help=q):
-                    st.session_state.selected_hist_idx = i
-                    st.rerun()
+            with st.container(key="hd_history"):
+                for i in range(len(hist) - 1, -1, -1):
+                    q = hist[i]["question"]
+                    q_short = (q[:46] + "…") if len(q) > 46 else q
+                    marker = "● " if i == active else ""
+                    if st.button(f"{marker}{q_short}", key=f"hist_btn_{i}", type="tertiary",
+                                 width="stretch", help=q):
+                        st.session_state.selected_hist_idx = i
+                        st.rerun()
             st.button(T[lang]["clear_history"], width="stretch", on_click=_clear_history)
 
         st.divider()
@@ -944,6 +993,216 @@ def render_sidebar(lang: str) -> tuple[str, bool]:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+_SCROLL_JS = (
+    "<script>setTimeout(function(){var d=window.parent.document;"
+    "var q=d.querySelectorAll('.hd-q');if(q.length){q[q.length-1]"
+    ".scrollIntoView({behavior:'smooth',block:'start'});}},350);</script>"
+)
+
+
+def question_form(lang: str, placeholder: str) -> None:
+    """The question box. Submitting queues the question; the page then runs it."""
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid, st.form("question_form", clear_on_submit=False, border=False):
+        c_in, c_btn = st.columns([6, 1], vertical_alignment="bottom")
+        with c_in:
+            st.text_input("question", placeholder=placeholder,
+                          key="q_input", label_visibility="collapsed")
+        with c_btn:
+            st.form_submit_button(f"🔍 {T[lang]['ask']}", type="primary",
+                                  width="stretch", on_click=_on_submit)
+
+
+def render_starters(lang: str) -> None:
+    rtl = " hd-rtl" if lang == "ar" else ""
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid:
+        st.markdown(f'<div class="sidebar-label{rtl}" style="margin-top:1.2rem">'
+                    f'{T[lang]["starter_prompt"]}</div>', unsafe_allow_html=True)
+        cols = st.columns(2)
+        for i, s in enumerate(STARTERS[lang]):
+            with cols[i % 2]:
+                st.button(s, key=f"starter_{lang}_{i}", width="stretch",
+                          on_click=_ask_starter, args=(s,))
+
+
+def _take_pending(lang: str) -> str | None:
+    """The queued question, if any -- unless this session is over its limit."""
+    q = st.session_state.pending_q
+    st.session_state.pending_q = None
+    if q and throttle_exceeded():
+        st.warning(T[lang]["throttled"])
+        return None
+    return q
+
+
+# ── Single jurisdiction: a conversation ──────────────────────────────────
+def _run_single(rag: HealdarRAG, q: str, lang: str) -> bool:
+    """Ask one question as the next turn of the conversation."""
+    record_query()
+    jx = st.session_state.last_jx
+    try:
+        with st.spinner(T[lang]["loading"]):
+            t0 = _time.perf_counter()
+            result = rag.ask(q, jurisdiction=jx,
+                             history=build_history_context(st.session_state.thread))
+            secs = _time.perf_counter() - t0
+    except HealdarError as exc:
+        show_error(exc, lang)
+        return False
+    _analytics.log_query(q, lang, "single", jurisdiction=jx,
+                         response_ms=int(secs * 1000), no_context=result.no_context)
+    log_session_query(lang, "single", [jx], secs, not result.no_context, result.coverage)
+    entry = {"question": q, "mode": "single", "lang": lang, "jurisdiction": jx, "result": result}
+    st.session_state.thread.append(entry)
+    st.session_state.chat_history.append(entry)
+    save_session(st.session_state.chat_history)
+    return True
+
+
+def render_thread(rag: HealdarRAG, lang: str) -> None:
+    """
+    Every turn stays on the page, the box sits under the latest answer, and a
+    follow-up carries the conversation with it. (Each answer used to replace
+    the last, so nobody could tell that follow-ups were possible.)
+    """
+    thread = st.session_state.thread
+    rtl = " hd-rtl" if lang == "ar" else ""
+    if not thread:
+        question_form(lang, T[lang]["q_placeholder"])
+
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid:
+        for i, entry in enumerate(thread):
+            e_lang = entry.get("lang", lang)
+            render_question_bubble(entry["question"], e_lang, understood_as(entry["result"]))
+            render_answer(entry["result"], entry["jurisdiction"], e_lang, card_id=f"t{i}")
+
+        pending = _take_pending(lang)
+        if pending:
+            render_question_bubble(pending, lang)
+            if _run_single(rag, pending, lang):
+                st.session_state.scroll_latest = True
+                st.rerun()
+
+        last = thread[-1]["result"] if thread else None
+        followups = getattr(last, "followups", None) or []
+        if followups and not last.no_context:
+            st.markdown(f'<div class="sidebar-label{rtl}" style="margin-top:.9rem">'
+                        f'{T[lang]["suggested"]}</div>', unsafe_allow_html=True)
+            with st.container(key="hd_followups"):
+                for j, fu in enumerate(followups):
+                    st.button(f"↳ {fu}", key=f"fu_{len(thread)}_{j}", width="stretch",
+                              on_click=_ask_starter, args=(fu,))
+
+    if not thread:
+        render_starters(lang)
+        return
+
+    question_form(lang, T[lang]["followup_placeholder"])
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid:
+        st.button(T[lang]["new_conversation"], type="tertiary", on_click=_new_conversation)
+    if st.session_state.scroll_latest:
+        st.session_state.scroll_latest = False
+        _components.html(_SCROLL_JS, height=0)
+
+
+# ── Comparison: one question, two jurisdictions ─────────────────────────
+def _last_compare_entry() -> dict | None:
+    return next((e for e in reversed(st.session_state.chat_history)
+                 if e.get("mode") == "compare"), None)
+
+
+def _run_compare(rag: HealdarRAG, q: str, lang: str) -> bool:
+    record_query()
+    jx_l, jx_r = st.session_state.last_jx_l, st.session_state.last_jx_r
+    try:
+        with st.spinner(T[lang]["loading"]):
+            t0 = _time.perf_counter()
+            # Both sides run concurrently — sequentially this was up to eight
+            # Groq calls behind one spinner in Arabic.
+            res_l, res_r = rag.ask_many([(q, jx_l), (q, jx_r)])
+            secs = _time.perf_counter() - t0
+    except HealdarError as exc:
+        show_error(exc, lang)
+        return False
+    _analytics.log_query(q, lang, "compare", jx_left=jx_l, jx_right=jx_r,
+                         response_ms=int(secs * 1000),
+                         no_context=res_l.no_context and res_r.no_context)
+    log_session_query(lang, "compare", [jx_l, jx_r], secs,
+                      not (res_l.no_context and res_r.no_context),
+                      "partial" if "partial" in (res_l.coverage, res_r.coverage) else "full")
+    st.session_state.chat_history.append(
+        {"question": q, "mode": "compare", "lang": lang,
+         "jx_l": jx_l, "jx_r": jx_r, "result_l": res_l, "result_r": res_r})
+    save_session(st.session_state.chat_history)
+    return True
+
+
+def _requery_compare(rag: HealdarRAG, lang: str) -> None:
+    """Re-ask the last comparison for whichever side's jurisdiction changed."""
+    last = _last_compare_entry()
+    if last is None or throttle_exceeded():
+        return
+    jx_l, jx_r = st.session_state.last_jx_l, st.session_state.last_jx_r
+    changed = [(side, jx) for side, jx in (("l", jx_l), ("r", jx_r)) if jx != last[f"jx_{side}"]]
+    if not changed:
+        return
+    record_query()
+    try:
+        with st.spinner(T[lang]["loading"]):
+            t0 = _time.perf_counter()
+            answers = rag.ask_many([(last["question"], jx) for _, jx in changed])
+            secs = _time.perf_counter() - t0
+    except HealdarError as exc:
+        show_error(exc, lang)
+        return
+    log_session_query(lang, "compare", [jx_l, jx_r], secs, True, "full")
+    for (side, jx), answer in zip(changed, answers, strict=True):
+        last[f"result_{side}"], last[f"jx_{side}"] = answer, jx
+
+
+def render_compare_entry(entry: dict, lang: str) -> None:
+    e_lang = entry.get("lang", lang)
+    render_question_bubble(entry["question"], e_lang)
+    col_l, col_r = st.columns(2, gap="large")
+    with col_l:
+        render_answer(entry["result_l"], entry["jx_l"], e_lang, card_id="left")
+    with col_r:
+        render_answer(entry["result_r"], entry["jx_r"], e_lang, card_id="right")
+
+
+def render_compare(rag: HealdarRAG, lang: str) -> None:
+    question_form(lang, T[lang]["q_placeholder"])
+    pending = _take_pending(lang)
+    if pending:
+        if _run_compare(rag, pending, lang):
+            st.rerun()
+    else:
+        _requery_compare(rag, lang)
+    last = _last_compare_entry()
+    if last is None:
+        render_starters(lang)
+    else:
+        render_compare_entry(last, lang)
+
+
+def render_history_entry(entry: dict, lang: str) -> None:
+    """A past question opened from the sidebar, with a way back."""
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid:
+        st.button(T[lang]["back_to_thread"], type="tertiary", on_click=_back_to_thread)
+    e_lang = entry.get("lang", lang)
+    if entry.get("mode") != "single":
+        render_compare_entry(entry, lang)
+        return
+    _, mid, _ = st.columns([1, 8, 1])
+    with mid:
+        render_question_bubble(entry["question"], e_lang, understood_as(entry["result"]))
+        render_answer(entry["result"], entry["jurisdiction"], e_lang, card_id="hist")
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Healdar — Health AI Regulatory Navigator",
@@ -959,7 +1218,6 @@ def main() -> None:
 
     # ── Header ───────────────────────────────────────────────────────────
     docs, bodies = corpus_stats()
-    rtl = " hd-rtl" if lang == "ar" else ""
     corpus = (f'<div class="hd-corpus">{_html.escape(T[lang]["corpus_line"].format(docs=docs, bodies=bodies))}'
               f' · v{config.APP_VERSION}</div>' if docs else "")
     st.markdown(
@@ -978,149 +1236,14 @@ def main() -> None:
         render_unavailable(exc, lang)
         return
 
-    # ── Question ─────────────────────────────────────────────────────────
-    _, mid, _ = st.columns([1, 8, 1])
-    with mid, st.form("question_form", clear_on_submit=False, border=False):
-        c_in, c_btn = st.columns([6, 1], vertical_alignment="bottom")
-        with c_in:
-            st.text_input("question", placeholder=T[lang]["q_placeholder"],
-                          key="q_input", label_visibility="collapsed")
-        with c_btn:
-            submitted = st.form_submit_button(f"🔍 {T[lang]['ask']}", type="primary",
-                                              width="stretch")
-
-    if st.session_state.auto_submit:
-        st.session_state.auto_submit = False
-        submitted = True
-
-    q = st.session_state.q_input.strip()
-
-    # ── Run a query ──────────────────────────────────────────────────────
-    if submitted and q and throttle_exceeded():
-        st.warning(T[lang]["throttled"])
-    elif submitted and q:
-        record_query()
-        try:
-            hist_ctx = build_history_context(st.session_state.chat_history)
-            if not compare:
-                jx = st.session_state.last_jx
-                with st.spinner(T[lang]["loading"]):
-                    t0 = _time.perf_counter()
-                    result = rag.ask(q, jurisdiction=jx, history=hist_ctx)
-                    secs = _time.perf_counter() - t0
-                _analytics.log_query(q, lang, "single", jurisdiction=jx,
-                                     response_ms=int(secs * 1000), no_context=result.no_context)
-                log_session_query(lang, "single", [jx], secs, not result.no_context,
-                                  result.coverage)
-                st.session_state.last_result = result
-                st.session_state.used_jx = jx
-                st.session_state.chat_history.append(
-                    {"question": q, "mode": "single", "lang": lang,
-                     "jurisdiction": jx, "result": result})
-            else:
-                jx_l, jx_r = st.session_state.last_jx_l, st.session_state.last_jx_r
-                with st.spinner(T[lang]["loading"]):
-                    t0 = _time.perf_counter()
-                    # Both sides run concurrently — sequentially this was up to
-                    # eight Groq calls behind one spinner in Arabic.
-                    res_l, res_r = rag.ask_many([(q, jx_l), (q, jx_r)], history=hist_ctx)
-                    secs = _time.perf_counter() - t0
-                _analytics.log_query(q, lang, "compare", jx_left=jx_l, jx_right=jx_r,
-                                     response_ms=int(secs * 1000),
-                                     no_context=res_l.no_context and res_r.no_context)
-                log_session_query(lang, "compare", [jx_l, jx_r], secs,
-                                  not (res_l.no_context and res_r.no_context),
-                                  "partial" if "partial" in (res_l.coverage, res_r.coverage) else "full")
-                st.session_state.last_result_l, st.session_state.last_result_r = res_l, res_r
-                st.session_state.used_jx_l, st.session_state.used_jx_r = jx_l, jx_r
-                st.session_state.chat_history.append(
-                    {"question": q, "mode": "compare", "lang": lang,
-                     "jx_l": jx_l, "jx_r": jx_r, "result_l": res_l, "result_r": res_r})
-            st.session_state.selected_hist_idx = None
-            save_session(st.session_state.chat_history)
-            st.rerun()   # refresh the sidebar history and session stats
-        except HealdarError as exc:
-            show_error(exc, lang)
-
-    # ── Re-ask the current question when the jurisdiction changes ────────
-    # This re-queries the model, so it counts against the throttle too.
-    elif q and not submitted and not throttle_exceeded():
-        try:
-            if not compare and st.session_state.last_result is not None:
-                jx = st.session_state.last_jx
-                if jx != st.session_state.used_jx:
-                    record_query()
-                    hist_ctx = build_history_context(st.session_state.chat_history[:-1])
-                    with st.spinner(T[lang]["loading"]):
-                        t0 = _time.perf_counter()
-                        result = rag.ask(q, jurisdiction=jx, history=hist_ctx)
-                        secs = _time.perf_counter() - t0
-                    log_session_query(lang, "single", [jx], secs, not result.no_context,
-                                      result.coverage)
-                    st.session_state.last_result = result
-                    st.session_state.used_jx = jx
-                    if st.session_state.chat_history:
-                        st.session_state.chat_history[-1]["result"] = result
-                        st.session_state.chat_history[-1]["jurisdiction"] = jx
-            elif compare:
-                jx_l, jx_r = st.session_state.last_jx_l, st.session_state.last_jx_r
-                changed_l = (st.session_state.last_result_l is not None
-                             and jx_l != st.session_state.used_jx_l)
-                changed_r = (st.session_state.last_result_r is not None
-                             and jx_r != st.session_state.used_jx_r)
-                if changed_l or changed_r:
-                    record_query()
-                    pending = [(q, j) for j, c in ((jx_l, changed_l), (jx_r, changed_r)) if c]
-                    with st.spinner(T[lang]["loading"]):
-                        t0 = _time.perf_counter()
-                        answers = rag.ask_many(pending)
-                        secs = _time.perf_counter() - t0
-                    log_session_query(lang, "compare", [jx_l, jx_r], secs, True, "full")
-                    last = st.session_state.chat_history[-1] if st.session_state.chat_history else None
-                    if changed_l:
-                        st.session_state.last_result_l = answers.pop(0)
-                        st.session_state.used_jx_l = jx_l
-                        if last:
-                            last["result_l"], last["jx_l"] = st.session_state.last_result_l, jx_l
-                    if changed_r:
-                        st.session_state.last_result_r = answers.pop(0)
-                        st.session_state.used_jx_r = jx_r
-                        if last:
-                            last["result_r"], last["jx_r"] = st.session_state.last_result_r, jx_r
-        except HealdarError as exc:
-            show_error(exc, lang)
-
-    # ── Empty state ──────────────────────────────────────────────────────
     hist = st.session_state.chat_history
-    if not hist:
-        _, mid, _ = st.columns([1, 8, 1])
-        with mid:
-            st.markdown(f'<div class="sidebar-label{rtl}" style="margin-top:1.2rem">'
-                        f'{T[lang]["starter_prompt"]}</div>', unsafe_allow_html=True)
-            cols = st.columns(2)
-            for i, s in enumerate(STARTERS[lang]):
-                with cols[i % 2]:
-                    st.button(s, key=f"starter_{lang}_{i}", width="stretch",
-                              on_click=_ask_starter, args=(s,))
-        return
-
-    # ── Selected (or latest) conversation entry ──────────────────────────
     sel = st.session_state.selected_hist_idx
-    entry = hist[sel] if (sel is not None and 0 <= sel < len(hist)) else hist[-1]
-    entry_lang = entry.get("lang", lang)
-
-    if entry.get("mode") == "single":
-        _, mid, _ = st.columns([1, 8, 1])
-        with mid:
-            render_question_bubble(entry["question"], entry_lang)
-            render_answer(entry["result"], entry["jurisdiction"], entry_lang, card_id="single")
+    if sel is not None and 0 <= sel < len(hist):
+        render_history_entry(hist[sel], lang)
+    elif compare:
+        render_compare(rag, lang)
     else:
-        render_question_bubble(entry["question"], entry_lang)
-        col_l, col_r = st.columns(2, gap="large")
-        with col_l:
-            render_answer(entry["result_l"], entry["jx_l"], entry_lang, card_id="left")
-        with col_r:
-            render_answer(entry["result_r"], entry["jx_r"], entry_lang, card_id="right")
+        render_thread(rag, lang)
 
 
 if __name__ == "__main__":

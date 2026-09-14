@@ -15,8 +15,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Release -- shown in the sidebar so users can tell which build answered them.
 # ---------------------------------------------------------------------------
-APP_VERSION  = "2.0.0"
-RELEASE_DATE = "2026-09-13"
+APP_VERSION  = "2.1.0"
+RELEASE_DATE = "2026-09-14"
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -143,6 +143,12 @@ MAX_PER_JURISDICTION = _env_int("HEALDAR_MAX_PER_JX", 2)
 ANSWER_MAX_TOKENS    = _env_int("HEALDAR_ANSWER_MAX_TOKENS", 1400)
 ANSWER_TEMPERATURE   = _env_float("HEALDAR_ANSWER_TEMPERATURE", 0.2)
 HISTORY_TURNS        = _env_int("HEALDAR_HISTORY_TURNS", 3)
+# How much of the latest answer a follow-up sees -- its opening and its end,
+# where the conclusion is -- enough to argue with its reasoning ("why IIb and
+# not IIa?"). Older turns get 400 characters.
+HISTORY_ANSWER_CHARS = _env_int("HEALDAR_HISTORY_ANSWER_CHARS", 2400)
+# Pages the previous answer cited that a follow-up starts from.
+CARRY_SOURCES        = _env_int("HEALDAR_CARRY_SOURCES", 3)
 
 # ---------------------------------------------------------------------------
 # App behaviour

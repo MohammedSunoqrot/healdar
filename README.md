@@ -13,7 +13,7 @@ license: apache-2.0
 
 # 📡🩺 Healdar — Health AI Regulatory Navigator
 
-**Version 2.0.0 · released 13 September 2026**
+**Version 2.1.0 · released 14 September 2026**
 
 **Bilingual AI assistant for navigating health AI regulations across the Gulf region, Europe, the United States and international bodies.**
 
@@ -45,6 +45,7 @@ properties matter more than fluency here:
 | **Arabic sources** | The UAE PDPL is indexed in its official Arabic text and is found from English questions, via multilingual embeddings |
 | **7 jurisdiction views** | 🇸🇦 Saudi Arabia · 🇦🇪 UAE · 🇶🇦 Qatar · 🇪🇺 EU · 🇺🇸 US · 🌐 International (WHO, IMDRF) · 🌍 All |
 | **Reasons through your case** | Describe a product and ask how the rules apply — which class, which pathway. Healdar searches for the rules that decide it, applies them step by step, cites the page behind each step, and states its assumptions |
+| **Follow-up conversation** | Answers stack as a conversation. Ask "why not Class IIa?" or "how would SFDA see it?" and Healdar reads it in context — showing what it understood — builds on the pages the last answer cited, and suggests next questions. **New conversation** starts fresh |
 | **Hybrid retrieval** | Dense embeddings **+** BM25, fused with Reciprocal Rank Fusion — so "Article 120" and "MDS-G010" are found by exact token, not just by meaning |
 | **Balanced "all" mode** | Passages are capped per jurisdiction, so the EU (44% of the corpus) cannot crowd out the Gulf regulators |
 | **Comparison mode** | Two jurisdictions side by side, queried in parallel |
@@ -64,9 +65,10 @@ User question (EN or AR)
         │
         ├── Arabic? ──► translate to English            gpt-oss-20b
         │
-        ├── follow-up? ──► rewrite as standalone        gpt-oss-20b
+        ├── plan: rewrite a follow-up to stand alone,   gpt-oss-120b
+        │         name the rules that decide it ─► 3 searches
         │
-        ├── plan: which rules decide this? ─► 3 searches gpt-oss-120b
+        ├── follow-up? ──► add the pages the last answer cited
         │
         ▼
 ┌────────────────────────────────────────────────┐
@@ -119,7 +121,7 @@ Healdar/
 │   ├── raw_docs/               # source PDFs, one folder per regulator — NOT committed
 │   └── runtime/                # local runtime data — NOT committed
 │
-├── tests/                  # 244 tests
+├── tests/                  # 268 tests
 └── .github/workflows/ci.yml
 ```
 
@@ -174,7 +176,7 @@ Decree-Law 45/2021, whose official text is Arabic only.
 ### Running the checks
 
 ```bash
-pytest tests -q                       # 244 tests
+pytest tests -q                       # 268 tests
 python eval/run_eval.py               # retrieval metrics (no API key needed)
 python eval/run_eval.py --full        # also generates answers (uses Groq)
 ruff check src tests eval scripts
