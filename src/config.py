@@ -15,7 +15,7 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Release -- shown in the sidebar so users can tell which build answered them.
 # ---------------------------------------------------------------------------
-APP_VERSION  = "2.1.3"
+APP_VERSION  = "2.1.4"
 RELEASE_DATE = "2026-09-14"
 
 # ---------------------------------------------------------------------------
@@ -90,10 +90,14 @@ AUTO_REBUILD_VECTORSTORE = _env_bool("HEALDAR_AUTO_REBUILD", True)
 GROQ_MODEL_SMALL  = _env_str("GROQ_MODEL",        "openai/gpt-oss-20b")
 GROQ_MODEL_LARGE  = _env_str("GROQ_MODEL_LARGE",  "openai/gpt-oss-120b")
 GROQ_MODEL_ANSWER = _env_str("GROQ_MODEL_ANSWER", GROQ_MODEL_LARGE)
-# When a model's *daily* allowance is used up, the same request goes to this one
-# instead, which has an allowance of its own. "none" turns the fallback off.
-_fallback = _env_str("GROQ_MODEL_FALLBACK", GROQ_MODEL_SMALL)
-GROQ_MODEL_FALLBACK = "" if _fallback.lower() in {"none", "off", "0"} else _fallback
+# When a model's *daily* allowance is used up, the request goes to these in turn,
+# each with an allowance of its own. qwen3.8-27b first: in trials it cited 3-6
+# passages per answer, where gpt-oss-20b mostly cited none. "none" turns it off.
+_fallbacks = _env_str("GROQ_MODEL_FALLBACK", "qwen/qwen3.8-27b,openai/gpt-oss-20b")
+GROQ_MODEL_FALLBACKS: tuple[str, ...] = (
+    () if _fallbacks.lower() in {"none", "off", "0"}
+    else tuple(m.strip() for m in _fallbacks.split(",") if m.strip())
+)
 
 GROQ_TIMEOUT     = _env_float("GROQ_TIMEOUT", 45.0)
 GROQ_MAX_RETRIES = _env_int("GROQ_MAX_RETRIES", 2)

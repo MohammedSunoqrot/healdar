@@ -147,6 +147,8 @@ T = {
         "rate_limit":     "⏳ The language-model rate limit was reached — please wait a moment and try again.",
         "rate_limit_daily": "⏳ Healdar has used today's free AI allowance. It frees up again in {wait} — please try then.",
         "backup_model":   "Answered by the backup AI model, because today's allowance for the main model is used up. Quality may be a little lower than usual.",
+        "uncited":        "This answer does not cite specific passages. The pages it was given are listed below — check them before relying on it.",
+        "consulted":      "Pages the answer was given",
         "starter_prompt": "Try asking",
         "weak_match":     "Only loosely related material was found — verify against the source documents before relying on this.",
         "partial_answer": "The documents only partly cover this question. Treat the answer as incomplete.",
@@ -208,6 +210,8 @@ T = {
         "rate_limit":     "⏳ تم الوصول إلى حد الطلبات — يرجى الانتظار لحظة ثم المحاولة مجدداً.",
         "rate_limit_daily": "⏳ استنفد هيلدار الحصة المجانية اليومية للذكاء الاصطناعي. ستتوفر مجدداً خلال {wait}، يُرجى المحاولة حينها.",
         "backup_model":   "أُجيب عن هذا السؤال بالنموذج الاحتياطي لأن الحصة اليومية للنموذج الرئيسي نفدت، وقد تكون الجودة أقل قليلاً من المعتاد.",
+        "uncited":        "لا تستشهد هذه الإجابة بمقاطع محددة. الصفحات التي أُعطيت لها مدرجة أدناه، فتحقّق منها قبل الاعتماد عليها.",
+        "consulted":      "الصفحات التي أُعطيت للإجابة",
         "starter_prompt": "جرّب أن تسأل",
         "weak_match":     "لم يُعثر إلا على محتوى ضعيف الصلة — يُرجى التحقق من الوثائق الرسمية قبل الاعتماد على هذه الإجابة.",
         "partial_answer": "الوثائق تغطي هذا السؤال جزئياً فقط. اعتبر الإجابة غير مكتملة.",
@@ -485,7 +489,8 @@ def text_to_html(text: str, ref_tooltips: dict | None = None) -> str:
     return formatting.to_html(text, cite=_ref_tag)
 
 
-def source_strip_html(indexed_sources: list[tuple[int, dict]], lang: str, card_id: str) -> str:
+def source_strip_html(indexed_sources: list[tuple[int, dict]], lang: str, card_id: str,
+                      title: str | None = None) -> str:
     """
     Numbered reference list matching the [N] superscripts in the answer.
     Each entry is a native <details> element: click to read the passage.
@@ -512,7 +517,19 @@ def source_strip_html(indexed_sources: list[tuple[int, dict]], lang: str, card_i
             f'</details>'
         )
     return (f'<div class="refs-section{rtl}"><div class="refs-title">'
-            f'{T[lang]["references"]}</div>{"".join(rows)}</div>')
+            f'{_html.escape(title or T[lang]["references"])}</div>{"".join(rows)}</div>')
+
+
+def displayed_sources(result: RAGAnswer) -> tuple[list[tuple[int, dict]], bool]:
+    """
+    The reference list to show under an answer, and whether the answer cited
+    nothing. An uncited answer still lists every page it was given -- the
+    backup models do not always follow the citation rule, and hiding the
+    evidence would be worse than admitting that.
+    """
+    cited = select_cited_sources(result.answer, result.sources)
+    uncited = not result.no_context and not cited and bool(result.sources)
+    return (list(enumerate(result.sources, start=1)) if uncited else cited), uncited
 
 
 def select_cited_sources(answer: str, sources: list[dict]) -> list[tuple[int, dict]]:
@@ -636,6 +653,7 @@ def render_question_bubble(question: str, lang: str, understood: str = "") -> No
 def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") -> None:
     card_id = card_id or jx_key
     indexed_cited = select_cited_sources(result.answer, result.sources)
+    strip_sources, uncited = displayed_sources(result)
     tooltips = {
         idx: f"{prettify_filename(s['filename'])} · {T[lang]['page']}{s['page_number']}"
         for idx, s in indexed_cited
@@ -646,8 +664,10 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
     notices = []
     if not result.no_context:
         used = getattr(result, "model", "")
-        if used and used == config.GROQ_MODEL_FALLBACK and used != config.GROQ_MODEL_ANSWER:
+        if used and used != config.GROQ_MODEL_ANSWER:
             notices.append(T[lang]["backup_model"])
+        if uncited:
+            notices.append(T[lang]["uncited"])
         if getattr(result, "quality", "ok") == "weak":
             notices.append(T[lang]["weak_match"])
         if getattr(result, "coverage", "full") == "partial":
@@ -672,7 +692,7 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
 
     st.markdown(
         f'<div class="hd-card"><div class="hd-card-head">{badge_html(jx_key, lang)}{meta}</div>'
-        f'{body}{source_strip_html(indexed_cited, lang, card_id)}'
+        f'{body}{source_strip_html(strip_sources, lang, card_id, title=T[lang]["consulted"] if uncited else None)}'
         f'<div class="disclaimer">{_html.escape(T[lang]["disclaimer"])}</div></div>',
         unsafe_allow_html=True,
     )
@@ -684,7 +704,7 @@ def render_answer(result: RAGAnswer, jx_key: str, lang: str, card_id: str = "") 
     copy_html = _copy_component_html(plain, T[lang]["copy"], T[lang]["copied"])
     fname = f"healdar_{jx_key}_{_export._file_date()}"
     label = jx_short(jx_key, "en")
-    sources = tuple(indexed_cited)
+    sources = tuple(strip_sources)
     col_copy, col_pdf, col_word, _ = st.columns([1, 1, 1, 3])
     with col_copy:
         _components.html(copy_html, height=42)

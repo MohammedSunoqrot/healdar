@@ -641,15 +641,35 @@ class TestDailyLimitFallback(unittest.TestCase):
         rag._call = mock.MagicMock(side_effect=list(effects))
         return rag
 
-    def test_daily_limit_reroutes_to_the_backup(self):
+    CHAIN = ("qwen/qwen3.8-27b", "openai/gpt-oss-20b")
+
+    def _complete(self, rag):
+        from unittest import mock
+        with mock.patch.object(config, "GROQ_MODEL_FALLBACKS", self.CHAIN):
+            return rag._complete(model=config.GROQ_MODEL_LARGE, content="q",
+                                 temperature=0, max_tokens=1400)
+
+    def test_daily_limit_reroutes_to_the_first_backup(self):
         rag = self._rag(rp.RateLimitError("x", daily=True), "backup answer")
-        text, used = rag._complete(model=config.GROQ_MODEL_LARGE, content="q",
-                                   temperature=0, max_tokens=100)
-        self.assertEqual((text, used), ("backup answer", config.GROQ_MODEL_FALLBACK))
+        self.assertEqual(self._complete(rag), ("backup answer", "qwen/qwen3.8-27b"))
         kwargs = rag._call.call_args.kwargs
-        self.assertEqual(kwargs["model"], config.GROQ_MODEL_FALLBACK)
-        self.assertEqual(kwargs["reasoning_effort"], "low")
-        self.assertGreater(kwargs["max_tokens"], 100)
+        self.assertEqual(kwargs["reasoning_effort"], "none")   # thinking off: cites, and fast
+        self.assertLessEqual(kwargs["max_tokens"], 1000)        # its per-minute output cap
+
+    def test_busy_backup_passes_to_the_next(self):
+        rag = self._rag(rp.RateLimitError("x", daily=True), rp.RateLimitError("busy"), "last resort")
+        self.assertEqual(self._complete(rag), ("last resort", "openai/gpt-oss-20b"))
+        kwargs = rag._call.call_args.kwargs
+        self.assertEqual(kwargs["reasoning_effort"], "medium")
+        self.assertGreater(kwargs["max_tokens"], 1400)          # headroom for its reasoning
+
+    def test_all_backups_used_up_reports_the_daily_limit(self):
+        rag = self._rag(rp.RateLimitError("x", daily=True, retry_after=1849),
+                        rp.RateLimitError("busy"), rp.RateLimitError("busy"))
+        with self.assertRaises(rp.RateLimitError) as caught:
+            self._complete(rag)
+        self.assertTrue(caught.exception.daily)
+        self.assertEqual(caught.exception.retry_after, 1849)
 
     def test_minute_limit_is_not_rerouted(self):
         rag = self._rag(rp.RateLimitError("x", daily=False))
@@ -660,7 +680,7 @@ class TestDailyLimitFallback(unittest.TestCase):
     def test_backup_can_be_turned_off(self):
         from unittest import mock
         rag = self._rag(rp.RateLimitError("x", daily=True))
-        with mock.patch.object(config, "GROQ_MODEL_FALLBACK", ""), \
+        with mock.patch.object(config, "GROQ_MODEL_FALLBACKS", ()), \
                 self.assertRaises(rp.RateLimitError):
             rag._complete(model=config.GROQ_MODEL_LARGE, content="q", temperature=0, max_tokens=100)
 
@@ -678,7 +698,7 @@ class TestDailyLimitFallback(unittest.TestCase):
             "Class IIa [Source 1].\nCOVERAGE: full",       # answer, backup model
         ])
         answer = rag.ask("Which class is my software under the EU MDR?", "eu")
-        self.assertEqual(answer.model, config.GROQ_MODEL_FALLBACK)
+        self.assertEqual(answer.model, config.GROQ_MODEL_FALLBACKS[0])
         self.assertIn("Class IIa", answer.answer)
 
 

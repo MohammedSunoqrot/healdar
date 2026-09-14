@@ -350,6 +350,29 @@ class TestConversationList(unittest.TestCase):
         self.assertEqual(app.history_items([self._e("old")])[0]["key"], 0)
 
 
+class TestUncitedAnswers(unittest.TestCase):
+    """An answer that cites nothing still shows the pages it was given."""
+
+    SOURCES = [{"filename": "A.pdf", "jurisdiction": "EU_MDCG", "page_number": 1, "text": "a"},
+               {"filename": "B.pdf", "jurisdiction": "EU_MDCG", "page_number": 2, "text": "b"}]
+
+    def test_uncited_answer_lists_every_page(self):
+        r = RAGAnswer(question="q", answer="Class IIa under Rule 11.", sources=self.SOURCES)
+        shown, uncited = app.displayed_sources(r)
+        self.assertTrue(uncited)
+        self.assertEqual([n for n, _ in shown], [1, 2])
+
+    def test_cited_answer_lists_only_what_it_cites(self):
+        r = RAGAnswer(question="q", answer="Class IIa [Source 2].", sources=self.SOURCES)
+        shown, uncited = app.displayed_sources(r)
+        self.assertFalse(uncited)
+        self.assertEqual([n for n, _ in shown], [2])
+
+    def test_refusal_is_not_uncited(self):
+        r = RAGAnswer(question="q", answer="No relevant material.", no_context=True)
+        self.assertEqual(app.displayed_sources(r), ([], False))
+
+
 class TestRateLimitMessages(unittest.TestCase):
     """A used-up daily allowance says when it frees up, instead of "wait a moment"."""
 

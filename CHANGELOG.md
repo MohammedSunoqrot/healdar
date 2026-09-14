@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.1.4 — 2026-09-14
+
+- **Backup answers cite their sources.** In 2.1.3 the backup model (gpt-oss-20b) mostly
+  ignored the citation rule: in trials it cited 0–1 passages per answer, and on the live
+  site an answer appeared with no references at all. The first backup is now
+  qwen3.8-27b, which cited 3–6 passages per answer in the same trials, with its thinking
+  off (1.5–3 s; the free plan caps it at 1,000 output tokens a minute). gpt-oss-20b is
+  the last resort, and a busy backup passes to the next. `GROQ_MODEL_FALLBACK` takes a
+  comma-separated list.
+- **An answer that cites nothing says so**, and lists every page it was given — on
+  screen and in the PDF and Word exports — instead of showing no evidence at all.
+
 ## 2.1.3 — 2026-09-14
 
 - **Keeps answering when the day's allowance runs out.** Groq's free plan gives the main
@@ -220,7 +232,7 @@ regulators.**
   gates CI and `deploy.sh`.
 - **CI** (`.github/workflows/ci.yml`): lint, tests with coverage, an LFS-pointer check,
   the retrieval evaluation, and a Docker build — weekly as well as on push.
-- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1, 285 in 2.1.2, 294 in 2.1.3).
+- Tests: 48 → 244 (269 in 2.1.0, 281 in 2.1.1, 285 in 2.1.2, 294 in 2.1.3, 299 in 2.1.4).
 - `src/config.py` centralises every tunable, all environment-overridable.
 - Comparison mode queries both jurisdictions in parallel; typed Groq error handling with
   timeouts and retries; readable startup-failure card; ratio-based Arabic detection;

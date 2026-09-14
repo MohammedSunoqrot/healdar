@@ -13,7 +13,7 @@ license: apache-2.0
 
 # 📡🩺 Healdar — Health AI Regulatory Navigator
 
-**Version 2.1.3 · released 14 September 2026**
+**Version 2.1.4 · released 14 September 2026**
 
 **Bilingual AI assistant for navigating health AI regulations across the Gulf region, Europe, the United States and international bodies.**
 
@@ -121,7 +121,7 @@ Healdar/
 │   ├── raw_docs/               # source PDFs, one folder per regulator — NOT committed
 │   └── runtime/                # local runtime data — NOT committed
 │
-├── tests/                  # 294 tests
+├── tests/                  # 299 tests
 └── .github/workflows/ci.yml
 ```
 
@@ -176,7 +176,7 @@ Decree-Law 45/2021, whose official text is Arabic only.
 ### Running the checks
 
 ```bash
-pytest tests -q                       # 294 tests
+pytest tests -q                       # 299 tests
 python eval/run_eval.py               # retrieval metrics (no API key needed)
 python eval/run_eval.py --full        # also generates answers (uses Groq)
 ruff check src tests eval scripts
@@ -200,7 +200,7 @@ Everything is environment-overridable — see `.env.example` for the full list.
 | `HEALDAR_HYBRID` | `1` | BM25 alongside dense search |
 | `HEALDAR_QUERY_PLANNING` | `1` | Search for the rules a question depends on, not just its wording |
 | `GROQ_MODEL_PLANNER` | `openai/gpt-oss-120b` | Plans those searches |
-| `GROQ_MODEL_FALLBACK` | `openai/gpt-oss-20b` | Takes over when the main model's daily allowance runs out (`none` = off) |
+| `GROQ_MODEL_FALLBACK` | `qwen/qwen3.8-27b,openai/gpt-oss-20b` | Backups, tried in turn when the main model's daily allowance runs out (`none` = off) |
 | `HEALDAR_MAX_PER_JX` | `2` | Per-jurisdiction cap in "all" mode |
 | `HEALDAR_PERSIST_SESSION` | `0` | Chat history to disk — **leave off when shared** |
 | `HEALDAR_ANALYTICS_QUESTIONS` | `0` | Store raw question text in the operator log |

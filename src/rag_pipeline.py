@@ -145,6 +145,19 @@ def _rate_limit_from(message: str) -> RateLimitError:
     return RateLimitError("Groq rate limit reached", daily=daily, retry_after=retry_after)
 
 
+def _backup_options(model: str, max_tokens: int) -> dict:
+    """How to call each backup model so it answers in full and keeps citing."""
+    if model.startswith("qwen/"):
+        # Measured on real prompts: thinking off cited 3-6 passages per answer
+        # in 1.5-3 s; thinking on took 20-26 s and once ran out of room. The
+        # free plan also caps these models at 1,000 output tokens a minute.
+        return {"max_tokens": min(max_tokens, 1000), "reasoning_effort": "none"}
+    if "gpt-oss" in model:
+        # Its reasoning counts against the budget; headroom keeps answers whole.
+        return {"max_tokens": max_tokens + 1500, "reasoning_effort": "medium"}
+    return {"max_tokens": max_tokens}
+
+
 def _wrap_groq_error(exc: Exception) -> Exception:
     """Map a Groq SDK exception onto a Healdar error the UI can render."""
     if isinstance(exc, groq.RateLimitError):
@@ -1032,24 +1045,27 @@ class HealdarRAG:
         One chat completion, returning (text, model actually used).
 
         When Groq refuses a model because its *daily* allowance is used up, the
-        same request goes once to the backup model, which has an allowance of
-        its own. Otherwise the whole site stops answering until the allowance
-        frees up: the free plan gives gpt-oss-120b 200,000 tokens a day, about
-        40 questions. Per-minute limits are not rerouted -- they clear in seconds.
+        same request goes to the backup models in turn, each with an allowance
+        of its own; a busy backup passes to the next. Otherwise the whole site
+        stops answering until the allowance frees up: the free plan gives
+        gpt-oss-120b 200,000 tokens a day, about 40 questions. Per-minute
+        limits are not rerouted -- they clear in seconds.
         """
         try:
             return self._call(model=model, content=content, temperature=temperature,
                               max_tokens=max_tokens), model
         except RateLimitError as exc:
-            backup = config.GROQ_MODEL_FALLBACK
-            if not exc.daily or not backup or backup == model:
+            backups = [m for m in config.GROQ_MODEL_FALLBACKS if m != model]
+            if not exc.daily or not backups:
                 raise
-            logger.warning("Daily allowance used up for %s; using %s", model, backup)
-            # The backup reasons before it writes, and that counts against the
-            # budget: low effort plus headroom keeps the answer from being cut off.
-            text = self._call(model=backup, content=content, temperature=temperature,
-                              max_tokens=max_tokens + 1500, reasoning_effort="low")
-            return text, backup
+            for backup in backups:
+                logger.warning("Daily allowance used up for %s; trying %s", model, backup)
+                try:
+                    return self._call(model=backup, content=content, temperature=temperature,
+                                      **_backup_options(backup, max_tokens)), backup
+                except RateLimitError as busy:
+                    logger.warning("Backup %s unavailable: %s", backup, busy)
+            raise exc from None
 
     def _call(self, *, model: str, content: str, temperature: float, max_tokens: int,
               reasoning_effort: str | None = None) -> str:
