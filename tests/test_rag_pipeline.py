@@ -554,6 +554,12 @@ class TestFollowUps(unittest.TestCase):
         body, followups = HealdarRAG._extract_followups("Body.\n\n**FOLLOW-UPS**\n- Is it Class III then?")
         self.assertEqual((body, followups), ("Body.", ["Is it Class III then?"]))
 
+    def test_followups_carry_no_markdown(self):
+        # Seen live (Arabic): "... **screening** ..." on a button label.
+        _, followups = HealdarRAG._extract_followups(
+            "Body.\nFOLLOW-UPS:\n- How does **screening** change the class?")
+        self.assertEqual(followups, ["How does screening change the class?"])
+
     def test_history_keeps_the_conclusion_of_a_long_answer(self):
         long_answer = "Rule 11 analysis step. " * 300 + "Conclusion: most likely Class IIb."
         prompt = _bare_rag()._build_prompt(

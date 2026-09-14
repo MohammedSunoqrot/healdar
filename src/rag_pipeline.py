@@ -590,7 +590,7 @@ class HealdarRAG:
             logger.warning("Follow-up translation failed: %s", exc)
             return []
         lines = [
-            re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
+            re.sub(r"\*\*|__", "", re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line)).strip()
             for line in (raw or "").splitlines()
             if line.strip()
         ]
@@ -982,7 +982,9 @@ class HealdarRAG:
         for line in answer[match.end():].splitlines():
             # gpt-oss often doubles the bullet ("- - What if ...").
             q = re.sub(r"^\s*(?:(?:[-*•]|\d+[.)])\s*)+", "", line)
-            q = config.CITATION_RE.sub("", q).strip().strip("*_\"'“”").strip()
+            # These become button labels, which show Markdown literally.
+            q = re.sub(r"\*\*|__", "", config.CITATION_RE.sub("", q))
+            q = q.strip().strip("*_\"'“”").strip()
             if 8 <= len(q) <= 200 and q not in items:
                 items.append(q)
         # ... and puts a horizontal rule above the block.
